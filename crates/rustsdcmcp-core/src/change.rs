@@ -18,6 +18,71 @@ use serde_json::Value;
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
+/// Classifies change-control surfaces. Out-of-band kinds never take the
+/// lab-mode waiver and always require an independent human approval, even
+/// when the server runs with `--lab-mode`. A single lab operator cannot
+/// resolve out-of-band drift from this server; the SD Cloud portal is the
+/// path for that. That is a fail-closed outcome, not a gap to close later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeKind {
+    /// Object create/update/delete write.
+    ObjectWrite,
+    /// Firewall policy write.
+    FirewallWrite,
+    /// License/certificate write.
+    LicenseWrite,
+    /// NAT policy write.
+    NatWrite,
+    /// Device inventory sync.
+    DeviceSync,
+    /// Firewall policy deploy (preview/commit).
+    PolicyDeploy,
+    /// Out-of-band change accept (P3, vendor-blocked; no caller exists yet).
+    OobAccept,
+    /// Out-of-band change reject (P4, vendor-blocked; no caller exists yet).
+    OobReject,
+}
+
+impl ChangeKind {
+    /// Whether this kind may take the single-operator lab-mode waiver.
+    ///
+    /// Only the OOB kinds refuse. Everything else keeps today's behavior.
+    #[must_use]
+    pub const fn allows_lab_mode_waiver(self) -> bool {
+        !matches!(self, Self::OobAccept | Self::OobReject)
+    }
+}
+
+/// Independently refuse an OOB apply unless it carries a genuine,
+/// non-waived, second-principal approval.
+///
+/// This check does not trust the coordinator's `Approved` state or
+/// `ChangeKind` routing at all: it re-derives the same verdict from the
+/// change set's own fields, so a future `apply_sdc_oob_accept` or
+/// `apply_sdc_oob_reject` that calls this is protected even if an upstream
+/// refactor regresses the coordinator's own checks.
+///
+/// # Errors
+///
+/// Returns an error when `approval_waiver` is set, `approver` is `None`, or
+/// `approver` equals `owner`.
+pub fn require_human_approval_for_oob(change_set: &ChangeSetOutput) -> Result<(), SdcError> {
+    let self_approved = change_set
+        .approver
+        .as_deref()
+        .is_none_or(|approver| approver == change_set.owner);
+    if change_set.approval_waiver.is_some() || self_approved {
+        return Err(SdcError::ChangeControl(
+            "out-of-band change resolution requires a genuine second-principal \
+             approval; lab-mode waivers, unapproved change sets, and \
+             self-approval are refused. Resolve this drift in the SD Cloud \
+             portal instead."
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Output of the SDC prepare/plan phase.
 #[derive(Debug, Clone, Serialize)]
 pub struct PrepareResult {
@@ -384,7 +449,9 @@ impl ChangeManager {
             )
             .await
             .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
-        let change_set = self.waive_if_lab_mode(change_set, &owner).await?;
+        let change_set = self
+            .waive_if_lab_mode(change_set, &owner, ChangeKind::ObjectWrite)
+            .await?;
         Ok(ObjectPrepareResult {
             change_set,
             prepared_change: prepared,
@@ -598,7 +665,9 @@ impl ChangeManager {
             )
             .await
             .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
-        let change_set = self.waive_if_lab_mode(change_set, &owner).await?;
+        let change_set = self
+            .waive_if_lab_mode(change_set, &owner, ChangeKind::FirewallWrite)
+            .await?;
         Ok(crate::FirewallPrepareResult {
             change_set,
             prepared_change: prepared,
@@ -854,7 +923,9 @@ impl ChangeManager {
             )
             .await
             .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
-        let change_set = self.waive_if_lab_mode(change_set, &owner).await?;
+        let change_set = self
+            .waive_if_lab_mode(change_set, &owner, ChangeKind::LicenseWrite)
+            .await?;
         Ok(crate::LicensePrepareResult {
             change_set,
             prepared_change: prepared,
@@ -1024,7 +1095,9 @@ impl ChangeManager {
             )
             .await
             .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
-        let change_set = self.waive_if_lab_mode(change_set, &owner).await?;
+        let change_set = self
+            .waive_if_lab_mode(change_set, &owner, ChangeKind::DeviceSync)
+            .await?;
         Ok(crate::DeviceSyncPrepareResult {
             change_set,
             prepared_change: prepared,
@@ -1289,7 +1362,9 @@ impl ChangeManager {
             )
             .await
             .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
-        let change_set = self.waive_if_lab_mode(change_set, &owner).await?;
+        let change_set = self
+            .waive_if_lab_mode(change_set, &owner, ChangeKind::NatWrite)
+            .await?;
         Ok(NatPrepareResult {
             change_set,
             prepared_change: prepared,
@@ -1483,7 +1558,9 @@ impl ChangeManager {
             )
             .await
             .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
-        let change_set = self.waive_if_lab_mode(change_set, &owner).await?;
+        let change_set = self
+            .waive_if_lab_mode(change_set, &owner, ChangeKind::PolicyDeploy)
+            .await?;
         Ok(PrepareResult {
             change_set,
             prepared_change: prepared,
@@ -1511,7 +1588,14 @@ impl ChangeManager {
         &self,
         change_set: ChangeSetOutput,
         owner: &str,
+        kind: ChangeKind,
     ) -> Result<ChangeSetOutput, SdcError> {
+        // OOB kinds never take the waiver, regardless of `--lab-mode`.
+        // Checked before the lab-mode flag itself so the kind is the single
+        // thing a caller must get right.
+        if !kind.allows_lab_mode_waiver() {
+            return Ok(change_set);
+        }
         if !self.coordinator.lab_mode() {
             return Ok(change_set);
         }
@@ -1988,6 +2072,139 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    /// OOB kinds never take the lab-mode waiver, even when the server runs
+    /// `--lab-mode` and the caller owns the change set. No
+    /// `prepare_sdc_oob_*` tool exists yet, so this drives the private
+    /// helper directly the way a future prepare implementation must.
+    #[tokio::test]
+    async fn oob_kinds_stay_planned_under_lab_mode_and_apply_refuses_them() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = SdcClient::from_test_parts(
+            Url::parse("https://example.invalid/").expect("url"),
+            "test-secret".to_owned(),
+            64 * 1024,
+            100,
+        );
+        let manager = ChangeManager::load(
+            client,
+            "tenant-a",
+            "https://example.invalid/".to_owned(),
+            None,
+            Duration::from_secs(60),
+            true,
+            None,
+            None,
+        )
+        .expect("change manager");
+
+        let prepared = prepared_fixture();
+        let change_set = manager
+            .coordinator
+            .create_change_set(
+                manager.tenant.clone(),
+                vec![prepared.clone()],
+                "alice".to_owned(),
+                prepared.preview_digest().to_owned(),
+                manager.policy_signature.clone(),
+            )
+            .await
+            .expect("create change set");
+
+        let change_set = manager
+            .waive_if_lab_mode(change_set, "alice", ChangeKind::OobAccept)
+            .await
+            .expect("oob kinds must not fail, only skip waiving");
+
+        assert_eq!(
+            change_set.state,
+            mecmcp_changeset::ChangeSetState::Planned,
+            "an OOB change set must still be Planned, not waived, under lab mode"
+        );
+        assert!(
+            change_set.approver.is_none(),
+            "no approver must be fabricated"
+        );
+        assert!(
+            change_set.approval_waiver.is_none(),
+            "an OOB change set must never carry a lab-mode waiver"
+        );
+
+        let cancellation = CancellationToken::new();
+        let error = manager
+            .apply(
+                change_set.change_set_id.clone(),
+                "alice".to_owned(),
+                change_set.digest.clone(),
+                prepared.preview_digest().to_owned(),
+                &Attribution::stdio(),
+                &cancellation,
+            )
+            .await
+            .expect_err("apply must refuse a Planned, non-waived OOB change set");
+        assert!(matches!(error, SdcError::ChangeControl(_)), "{error:?}");
+    }
+
+    /// The independent apply-side guard refuses on `approval_waiver`, a
+    /// missing `approver`, or a self-approved `approver` alone, without
+    /// consulting `state` or any coordinator decision. This is the half of
+    /// the guard a future `apply_sdc_oob_*` must call on the change set it
+    /// is about to act on.
+    #[test]
+    fn require_human_approval_for_oob_rejects_every_non_human_shape() {
+        fn synthetic(approver: Option<&str>, approval_waiver: Option<&str>) -> ChangeSetOutput {
+            ChangeSetOutput {
+                change_set_id: "cs-1".to_owned(),
+                owner: "alice".to_owned(),
+                device: "tenant-a".to_owned(),
+                digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_owned(),
+                state: mecmcp_changeset::ChangeSetState::Approved,
+                approver: approver.map(str::to_owned),
+                expires_at_unix: 0,
+                action_count: 1,
+                approval_waiver: approval_waiver.map(str::to_owned),
+                actions: None,
+            }
+        }
+
+        require_human_approval_for_oob(&synthetic(Some("bob"), None))
+            .expect("a genuine named approver with no waiver must be accepted");
+
+        let unapproved = synthetic(None, None);
+        require_human_approval_for_oob(&unapproved)
+            .expect_err("approver: null must be refused regardless of state");
+
+        let waived = synthetic(None, Some("lab-mode"));
+        require_human_approval_for_oob(&waived)
+            .expect_err("a lab-mode waiver must be refused regardless of state");
+
+        // Belt and braces: even if a future bug stamped an approver onto a
+        // waived record, the waiver alone still refuses it.
+        let waived_with_approver = synthetic(Some("bob"), Some("lab-mode"));
+        require_human_approval_for_oob(&waived_with_approver)
+            .expect_err("a waiver must refuse even alongside a non-null approver");
+
+        // Independent of any coordinator decision: an approver that matches
+        // the owner is a self-approval and must be refused on its own.
+        let self_approved = synthetic(Some("alice"), None);
+        require_human_approval_for_oob(&self_approved)
+            .expect_err("owner == approver must be refused regardless of state");
+    }
+
+    /// Pins the table so a future PR cannot silently relax it by flipping
+    /// an OOB variant's bool, the way a routine refactor could.
+    #[test]
+    fn only_oob_kinds_refuse_the_lab_mode_waiver() {
+        assert!(ChangeKind::ObjectWrite.allows_lab_mode_waiver());
+        assert!(ChangeKind::FirewallWrite.allows_lab_mode_waiver());
+        assert!(ChangeKind::LicenseWrite.allows_lab_mode_waiver());
+        assert!(ChangeKind::NatWrite.allows_lab_mode_waiver());
+        assert!(ChangeKind::DeviceSync.allows_lab_mode_waiver());
+        assert!(ChangeKind::PolicyDeploy.allows_lab_mode_waiver());
+        assert!(!ChangeKind::OobAccept.allows_lab_mode_waiver());
+        assert!(!ChangeKind::OobReject.allows_lab_mode_waiver());
     }
 
     #[tokio::test]
