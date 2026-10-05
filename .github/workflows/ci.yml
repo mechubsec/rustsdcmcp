@@ -245,7 +245,10 @@ jobs:
       - name: Build image
         run: docker build --tag rustsdcmcp:ci .
       - name: Conformance
-        uses: mechubsec/mecmcp/packaging/conformance@433d662d950c5979ba182a6ed110e7d35cae24ee
+        # Pinned past mecmcp v0.26.1 (unreleased on main) for mecmcp#492,
+        # which teaches the manifest reader the audit_hmac_flag key this
+        # repo's conformance.toml now sets. No tagged release contains it yet.
+        uses: mechubsec/mecmcp/packaging/conformance@373dc51cac90b97e728e20363b4b05d7b2c179a5
         with:
           staging: staging
           manifest: staging/conformance.toml
