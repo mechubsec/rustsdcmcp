@@ -20,8 +20,9 @@ mod redact;
 
 pub use catalog::{ResourceKind, WritableResource};
 pub use change::{
-    ApplyResult, ChangeManager, NatApplyResult, NatPrepareResult, ObjectApplyResult,
+    ApplyResult, ChangeKind, ChangeManager, NatApplyResult, NatPrepareResult, ObjectApplyResult,
     ObjectPrepareResult, PrepareResult, SdcTransaction, ValidationReport,
+    require_human_approval_for_oob,
 };
 pub use client::{SdcClient, SdcError};
 pub use config::{AuthScheme, SdcConfig};
