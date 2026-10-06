@@ -1,4 +1,4 @@
-//! Credential redaction for tool output.
+//! Credential redaction and device oob_drift computation for tool output.
 //!
 //! Applied at the MCP tool boundary only, never inside [`crate::SdcClient`],
 //! for the reason `projection.rs` gives: change-control reads the same
@@ -163,8 +163,111 @@ pub fn redact_rma_state(mut value: Value) -> Value {
     value
 }
 
+/// Clamp a string to a maximum length (in bytes), keeping only ASCII
+/// printable graphic characters and spaces.
+///
+/// This is an allowlist, not a control-character blacklist: the upstream
+/// value is an enum-like token, so dropping everything outside
+/// `is_ascii_graphic() || ' '` also removes bidi/format characters (for
+/// example U+202E RIGHT-TO-LEFT OVERRIDE, Unicode category Cf, which
+/// `char::is_control` does not flag) and ANSI escape sequences, not just
+/// C0/C1 control bytes.
+fn clamp_and_sanitize(s: &str, max_len: usize) -> String {
+    let mut result = String::new();
+    let mut len = 0;
+    for c in s.chars() {
+        if !(c.is_ascii_graphic() || c == ' ') {
+            continue;
+        }
+        if len + c.len_utf8() > max_len {
+            break;
+        }
+        len += c.len_utf8();
+        result.push(c);
+    }
+    result
+}
+
+/// Apply oob_drift computation to a device value.
+///
+/// Computes an advisory oob_drift block based on the device_config_state field:
+/// - absent -> state: "none"
+/// - `"OUT_OF_BAND_CHANGED"` -> state: "out_of_band_changed" (raw value preserved)
+/// - any other string -> state: "unknown" (raw value preserved)
+/// - present but not a string (unexpected upstream shape) -> state: "unknown"
+///   (no raw value to report)
+///
+/// The block contains only advisory text; no device configuration.
+#[must_use]
+pub fn apply_oob_drift(mut value: Value) -> Value {
+    use serde_json::Map;
+
+    if let Some(obj) = value.as_object_mut() {
+        // Determine the state enum-like value and the sanitized raw value to
+        // report alongside it. Matched against the field's `Value`, not a
+        // `&str` projection: a present-but-non-string field (for example a
+        // stray `null` or number from an upstream API change) must not
+        // collapse into the same "none" the spec reserves for an absent
+        // field — that direction fails open on a drift signal.
+        let (state, safe_raw) = match obj.get("device_config_state") {
+            None => ("none", None),
+            Some(Value::String(s)) if s == "OUT_OF_BAND_CHANGED" => {
+                ("out_of_band_changed", Some(clamp_and_sanitize(s, 256)))
+            }
+            Some(Value::String(s)) => ("unknown", Some(clamp_and_sanitize(s, 256))),
+            Some(_) => ("unknown", None),
+        };
+
+        // Build the oob_drift block
+        let mut oob_drift = Map::new();
+
+        oob_drift.insert("state".to_string(), Value::String(state.to_string()));
+        oob_drift.insert(
+            "raw_device_config_state".to_string(),
+            safe_raw.map_or(Value::Null, Value::String),
+        );
+        oob_drift.insert("resolution_available_here".to_string(), Value::Bool(false));
+
+        // resolution_paths - always the portal action
+        let mut portal_path = Map::new();
+        portal_path.insert("action".to_string(), Value::String("portal".to_string()));
+        portal_path.insert(
+            "where".to_string(),
+            Value::String("SDC portal → Devices → Resolve out-of-band changes".to_string()),
+        );
+        portal_path.insert(
+            "accept_means".to_string(),
+            Value::String(
+                "SDC imports the device's change; the device is not modified".to_string(),
+            ),
+        );
+        portal_path.insert(
+            "reject_means".to_string(),
+            Value::String(
+                "the change is DELETED from the device; SDC never held a copy".to_string(),
+            ),
+        );
+        let resolution_paths = vec![Value::Object(portal_path)];
+        oob_drift.insert(
+            "resolution_paths".to_string(),
+            Value::Array(resolution_paths),
+        );
+
+        // not_a_remedy - list actions that don't resolve this
+        let not_a_remedy = vec![Value::String(
+            "apply_sdc_device_inventory_sync — inventory only, leaves this state untouched"
+                .to_string(),
+        )];
+        oob_drift.insert("not_a_remedy".to_string(), Value::Array(not_a_remedy));
+
+        obj.insert("oob_drift".to_string(), Value::Object(oob_drift));
+    }
+    value
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     #[test]
     fn paging_tokens_survive_redaction() {
         // Percy B1 (MEC-440): the compound `*token` match redacted #172's
@@ -556,5 +659,210 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    #[test]
+    fn apply_oob_drift_adds_block_to_device_with_no_state() {
+        let device = serde_json::json!({
+            "uuid": "12345678-1234-1234-1234-123456789abc"
+        });
+
+        let result = apply_oob_drift(device);
+
+        assert!(result.get("oob_drift").is_some());
+        let drift = result
+            .get("oob_drift")
+            .expect("oob_drift field should be present");
+        assert_eq!(
+            drift
+                .get("state")
+                .expect("state field should be present")
+                .as_str()
+                .expect("state should be a string"),
+            "none"
+        );
+        assert!(drift.get("raw_device_config_state").unwrap().is_null());
+    }
+
+    #[test]
+    fn apply_oob_drift_adds_block_to_device_with_out_of_band_state() {
+        let device = serde_json::json!({
+            "uuid": "12345678-1234-1234-1234-123456789abc",
+            "device_config_state": "OUT_OF_BAND_CHANGED"
+        });
+
+        let result = apply_oob_drift(device);
+
+        let drift = result
+            .get("oob_drift")
+            .expect("oob_drift field should be present");
+        assert_eq!(
+            drift
+                .get("state")
+                .expect("state field should be present")
+                .as_str()
+                .expect("state should be a string"),
+            "out_of_band_changed"
+        );
+        assert_eq!(
+            drift
+                .get("raw_device_config_state")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "OUT_OF_BAND_CHANGED"
+        );
+    }
+
+    #[test]
+    fn apply_oob_drift_adds_block_to_device_with_other_state() {
+        let device = serde_json::json!({
+            "uuid": "12345678-1234-1234-1234-123456789abc",
+            "device_config_state": "some_other_value"
+        });
+
+        let result = apply_oob_drift(device);
+
+        let drift = result
+            .get("oob_drift")
+            .expect("oob_drift field should be present");
+        assert_eq!(
+            drift
+                .get("state")
+                .expect("state field should be present")
+                .as_str()
+                .expect("state should be a string"),
+            "unknown"
+        );
+        assert_eq!(
+            drift
+                .get("raw_device_config_state")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "some_other_value"
+        );
+    }
+
+    #[test]
+    fn apply_oob_drift_preserves_other_fields() {
+        let device = serde_json::json!({
+            "uuid": "12345678-1234-1234-1234-123456789abc",
+            "name": "test-device",
+            "device_config_state": "OUT_OF_BAND_CHANGED",
+            "status": "connected"
+        });
+
+        let result = apply_oob_drift(device);
+
+        assert_eq!(
+            result
+                .get("name")
+                .expect("name field should be present")
+                .as_str()
+                .expect("should be string"),
+            "test-device"
+        );
+        assert_eq!(
+            result
+                .get("status")
+                .expect("status field should be present")
+                .as_str()
+                .expect("should be string"),
+            "connected"
+        );
+    }
+
+    /// F1 (MEC-1995 review of #216): a present-but-non-string
+    /// `device_config_state` must not read as `"none"` — that's the value
+    /// reserved for the field being absent, and a drift indicator that fails
+    /// open to "no drift" on an unparseable upstream value is the wrong
+    /// direction to be wrong in.
+    #[test]
+    fn apply_oob_drift_non_string_state_is_unknown_not_none() {
+        for raw in [json!(null), json!(7), json!({"x": 1}), json!([1, 2])] {
+            let device = json!({"device_config_state": raw.clone()});
+            let result = apply_oob_drift(device);
+            let drift = result.get("oob_drift").expect("oob_drift present");
+            assert_eq!(
+                drift.get("state").unwrap().as_str().unwrap(),
+                "unknown",
+                "raw value {raw:?} must not collapse to \"none\""
+            );
+            assert!(drift.get("raw_device_config_state").unwrap().is_null());
+        }
+    }
+
+    /// F1: absent is still the one case that reads `"none"`.
+    #[test]
+    fn apply_oob_drift_absent_state_is_none() {
+        let device = json!({"uuid": "x"});
+        let result = apply_oob_drift(device);
+        let drift = result.get("oob_drift").expect("oob_drift present");
+        assert_eq!(drift.get("state").unwrap().as_str().unwrap(), "none");
+    }
+
+    /// Spoofing check: a pre-existing upstream `oob_drift` key must be
+    /// overwritten with the computed block, never trusted as-is.
+    #[test]
+    fn apply_oob_drift_overwrites_a_preexisting_upstream_block() {
+        let device = json!({
+            "device_config_state": "OUT_OF_BAND_CHANGED",
+            "oob_drift": {"state": "none"}
+        });
+        let result = apply_oob_drift(device);
+        let drift = result.get("oob_drift").expect("oob_drift present");
+        assert_eq!(
+            drift.get("state").unwrap().as_str().unwrap(),
+            "out_of_band_changed"
+        );
+    }
+
+    /// F2 (MEC-1995 review of #216): bidi/format characters must not survive
+    /// the sanitizer. U+202E is Unicode category Cf (format), which
+    /// `char::is_control` does not flag, so the old control-char blacklist
+    /// let it through.
+    #[test]
+    fn clamp_and_sanitize_strips_bidi_override_characters() {
+        let out = clamp_and_sanitize("A\u{202E}B", 256);
+        assert_eq!(out, "AB");
+    }
+
+    /// F2: newlines and tabs were explicitly kept by the old blacklist;
+    /// the allowlist drops them too, since the field is a single enum-like
+    /// token, not a text block.
+    #[test]
+    fn clamp_and_sanitize_strips_newlines_and_tabs() {
+        let out = clamp_and_sanitize("A\nB\tC", 256);
+        assert_eq!(out, "ABC");
+    }
+
+    /// F2: an ANSI escape sequence is only partially removed by a
+    /// control-char blacklist (the ESC byte is a control character, but the
+    /// `[31m` that follows it is plain printable text).
+    #[test]
+    fn clamp_and_sanitize_strips_the_esc_control_byte() {
+        let out = clamp_and_sanitize("A\u{1b}[31mB", 256);
+        // The allowlist drops the ESC control byte. `[31m` is plain ASCII
+        // graphic text, so it is not an escape sequence once ESC is gone —
+        // the allowlist does not parse ANSI sequences as a unit.
+        assert_eq!(out, "A[31mB");
+    }
+
+    /// F2: the length check used to run *before* the push, so a multi-byte
+    /// character straddling the cap could leave the result up to
+    /// `max_len + char_len - 1` bytes long. Confirm the cap is now a hard
+    /// byte-length ceiling.
+    #[test]
+    fn clamp_and_sanitize_enforces_a_hard_byte_length_cap() {
+        let input = "x".repeat(300);
+        let out = clamp_and_sanitize(&input, 256);
+        assert_eq!(out.len(), 256);
+    }
+
+    #[test]
+    fn clamp_and_sanitize_keeps_plain_ascii_text() {
+        let out = clamp_and_sanitize("OUT_OF_BAND_CHANGED", 256);
+        assert_eq!(out, "OUT_OF_BAND_CHANGED");
     }
 }
