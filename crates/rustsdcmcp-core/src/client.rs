@@ -3983,6 +3983,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_large_tenants_users_and_roles_page_independently_through_the_mcp_layer() {
+        // `list_users_and_roles` combines two independently-sized SDC
+        // collections into one `{"users": ..., "roles": ...}` envelope. A
+        // tenant with many more users than roles must not force the roles
+        // sub-list to share a continuation cursor with users, and the byte
+        // budget each sub-list pages against must be independent: this
+        // drives the real fetch, then pages each sub-list the way
+        // `list_users_and_roles` does in the server, with a budget tight
+        // enough that each sub-list needs more than one page on its own.
+        let app = Router::new()
+            .route(
+                "/api/v2/users",
+                get(|| async move {
+                    let users: Vec<serde_json::Value> = (0..500)
+                        .map(|index| {
+                            serde_json::json!({
+                                "user_id": format!("u{index}"),
+                                "email": format!("user{index}@example.com"),
+                                "name": format!("User {index} with a reasonably long display name"),
+                                "status": "active",
+                                "last_login": "2026-09-01T00:00:00Z",
+                                "role": [{"role_name": "viewer"}],
+                            })
+                        })
+                        .collect();
+                    Json(serde_json::json!({"users": users, "user_count": "500"}))
+                }),
+            )
+            .route(
+                "/api/v2/roles",
+                get(|| async move {
+                    let roles: Vec<serde_json::Value> = (0..40)
+                        .map(|index| {
+                            serde_json::json!({
+                                "UUID": format!("r{index}"),
+                                "name": format!("role-{index}"),
+                                "capabilities": ["read", "write", "approve"],
+                                "predefined": false,
+                            })
+                        })
+                        .collect();
+                    Json(serde_json::json!({"roles": roles, "role_count": "40"}))
+                }),
+            );
+        let (base_url, server) = serve(app).await;
+        let sdc = client(base_url, 8 * 1024 * 1024);
+        // `client()` configures `max_page_size` 100; the test endpoint ignores
+        // the requested size and returns the full 500/40 tenant regardless,
+        // simulating an SDC response larger than what was asked for.
+        let fetched = sdc
+            .list_users_and_roles(
+                ListRequest::new(0, 100, 100).expect("test page"),
+                ListRequest::new(0, 40, 100).expect("test page"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("combined fetch succeeds");
+        let projected = crate::project_users_and_roles(fetched).expect("projection succeeds");
+        let users_envelope = projected["users"].clone();
+        let roles_envelope = projected["roles"].clone();
+
+        let mut users_token: Option<String> = None;
+        let mut users_seen = 0usize;
+        let mut users_pages = 0usize;
+        loop {
+            let page = crate::paging::page_list(
+                &users_envelope,
+                "users",
+                None,
+                users_token.as_deref(),
+                4_096,
+            )
+            .expect("users page succeeds");
+            assert_eq!(page.total_item_count, 500);
+            users_seen += page.page_item_count;
+            users_pages += 1;
+            assert!(users_pages < 500, "users paging did not converge");
+            match page.continuation_token {
+                Some(next) => users_token = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(users_seen, 500);
+        assert!(users_pages > 1, "500 users must not fit in one 4 KiB page");
+
+        let mut roles_token: Option<String> = None;
+        let mut roles_seen = 0usize;
+        let mut roles_pages = 0usize;
+        loop {
+            let page = crate::paging::page_list(
+                &roles_envelope,
+                "roles",
+                None,
+                roles_token.as_deref(),
+                4_096,
+            )
+            .expect("roles page succeeds");
+            assert_eq!(page.total_item_count, 40);
+            roles_seen += page.page_item_count;
+            roles_pages += 1;
+            assert!(roles_pages < 40, "roles paging did not converge");
+            match page.continuation_token {
+                Some(next) => roles_token = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(roles_seen, 40);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn get_site_addresses_the_site_by_one_encoded_name_segment() {
         let app = Router::new().route(
             "/api/v2/site/{site_name}",

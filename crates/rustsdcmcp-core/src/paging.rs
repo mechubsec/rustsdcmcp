@@ -94,6 +94,32 @@ pub fn page_list(
     })
 }
 
+/// Page two independent list envelopes against one shared byte budget, split
+/// evenly so neither alone can exhaust it.
+///
+/// `list_users_and_roles` returns users and roles as two unrelated arrays
+/// rather than one `items` list, so [`page_list`] alone cannot page it: each
+/// sub-list needs its own continuation token and its own share of the budget.
+///
+/// # Errors
+///
+/// Returns [`PageError`] if either envelope does not resolve to a JSON array
+/// under its key, or either continuation token is invalid.
+pub fn page_paired_lists(
+    first_envelope: &Value,
+    first_key: &'static str,
+    first_token: Option<&str>,
+    second_envelope: &Value,
+    second_key: &'static str,
+    second_token: Option<&str>,
+    budget_bytes: usize,
+) -> Result<(ListPage, ListPage), PageError> {
+    let half_budget = budget_bytes / 2;
+    let first = page_list(first_envelope, first_key, None, first_token, half_budget)?;
+    let second = page_list(second_envelope, second_key, None, second_token, half_budget)?;
+    Ok((first, second))
+}
+
 fn project_fields(item: &Value, fields: Option<&[String]>) -> Value {
     let Some(fields) = fields else {
         return item.clone();
@@ -225,5 +251,84 @@ mod tests {
     fn a_missing_items_array_is_refused() {
         let error = page_list(&json!({}), "items", None, None, 65_536).unwrap_err();
         assert_eq!(error, PageError::NotAList("items"));
+    }
+
+    fn users_envelope(count: usize) -> Value {
+        let users: Vec<Value> = (0..count)
+            .map(|index| json!({"user_id": format!("user-{index}"), "email": format!("user{index}@example.com"), "name": "User Name", "status": "active", "last_login": "2026-01-01T00:00:00Z", "role": []}))
+            .collect();
+        json!({"users": users})
+    }
+
+    fn roles_envelope(count: usize) -> Value {
+        let roles: Vec<Value> = (0..count)
+            .map(|index| json!({"uuid": format!("role-{index}"), "name": format!("role {index}"), "capabilities": ["read", "write"], "predefined": false}))
+            .collect();
+        json!({"roles": roles})
+    }
+
+    #[test]
+    fn page_paired_lists_pages_each_list_independently() {
+        let users = users_envelope(500);
+        let roles = roles_envelope(3);
+        let (users_page, roles_page) =
+            page_paired_lists(&users, "users", None, &roles, "roles", None, 8_192).expect("pages");
+        assert_eq!(roles_page.page_item_count, 3);
+        assert_eq!(roles_page.continuation_token, None);
+        assert!(
+            users_page.page_item_count < 500,
+            "500 users must not fit in half of an 8 KiB budget"
+        );
+        assert!(users_page.continuation_token.is_some());
+    }
+
+    #[test]
+    fn page_paired_lists_splits_the_budget_so_one_list_cannot_starve_the_other() {
+        // Both lists are individually large enough to exhaust the full budget
+        // alone; proving each gets at least one item back from its own half
+        // is what distinguishes this from a naive "page users with the whole
+        // budget, then roles with whatever (nothing) is left" bug.
+        let users = users_envelope(10_000);
+        let roles = roles_envelope(10_000);
+        let (users_page, roles_page) =
+            page_paired_lists(&users, "users", None, &roles, "roles", None, 8_192).expect("pages");
+        assert!(users_page.page_item_count >= 1);
+        assert!(roles_page.page_item_count >= 1);
+    }
+
+    #[test]
+    fn page_paired_lists_round_trips_continuation_tokens_independently() {
+        let users = users_envelope(10);
+        let roles = roles_envelope(10);
+        let (first_users, first_roles) =
+            page_paired_lists(&users, "users", None, &roles, "roles", None, 256)
+                .expect("first page");
+        let users_token = first_users.continuation_token.expect("more users remain");
+        // Roles already exhausted in the first page; its token must stay `None`
+        // rather than being coupled to the users side advancing.
+        let (second_users, second_roles) = page_paired_lists(
+            &users,
+            "users",
+            Some(&users_token),
+            &roles,
+            "roles",
+            first_roles.continuation_token.as_deref(),
+            256,
+        )
+        .expect("second page");
+        assert_eq!(
+            second_users.items[0]["user_id"],
+            format!("user-{}", first_users.page_item_count)
+        );
+        assert_eq!(second_roles.total_item_count, 10);
+    }
+
+    #[test]
+    fn page_paired_lists_refuses_the_wrong_key_on_either_side() {
+        let users = users_envelope(1);
+        let roles = roles_envelope(1);
+        let error =
+            page_paired_lists(&users, "roles", None, &roles, "roles", None, 65_536).unwrap_err();
+        assert_eq!(error, PageError::NotAList("roles"));
     }
 }

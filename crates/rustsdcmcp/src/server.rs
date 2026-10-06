@@ -17,10 +17,11 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use rustsdcmcp_core::{
-    ChangeManager, DeviceConfigSection, ImageJob, ListRequest, NatWriteOperation,
+    ChangeManager, DeviceConfigSection, ImageJob, ListPage, ListRequest, NatWriteOperation,
     ObjectWriteAction, PolicyOperation, ResourceKind, SdcClient, SdcError, WritableResource,
-    apply_oob_drift, page_list, project_ca_certificates, project_license, project_licenses,
-    project_local_certificates, project_users_and_roles, redact_rma_state, redact_secrets,
+    apply_oob_drift, page_list, page_paired_lists, project_ca_certificates, project_license,
+    project_licenses, project_local_certificates, project_users_and_roles, redact_rma_state,
+    redact_secrets,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -203,6 +204,32 @@ impl SdcHandler {
     ) -> Result<(), HandlerAuthorizationError> {
         authorize_request(caller, tool, tenant, &self.tenant)
     }
+
+    /// Slice a list handler's fetched `{"items": [...]}` envelope into one
+    /// byte-budgeted page, so a large tenant degrades to more calls instead
+    /// of handing the model a response far past LLM context size.
+    ///
+    /// Applied uniformly to every list handler regardless of whether the
+    /// underlying SDC endpoint also paginates with `from`/`size`: that bounds
+    /// item *count*, not the byte size of the page, and an estate-scale
+    /// tenant's full-size page can still be megabytes of JSON.
+    fn paginate_list(
+        &self,
+        result: Result<Value, SdcError>,
+        fields: Option<&[String]>,
+        continuation_token: Option<&str>,
+    ) -> Result<ListPage, SdcError> {
+        result.and_then(|value| {
+            page_list(
+                &value,
+                "items",
+                fields,
+                continuation_token,
+                self.client.list_page_budget_bytes(),
+            )
+            .map_err(SdcError::from)
+        })
+    }
 }
 
 fn authorize_request(
@@ -316,6 +343,11 @@ pub struct ListArgs {
     pub from: u64,
     /// Explicit positive page size.
     pub size: u32,
+    /// Continuation token from a prior call's response, for when this
+    /// `from`/`size` page itself exceeds the response byte budget; omit to
+    /// start at the first byte-budgeted sub-page.
+    #[serde(default)]
+    pub continuation_token: Option<String>,
 }
 
 /// Arguments for one NAT pool.
@@ -358,6 +390,10 @@ pub struct DeviceGroupListArgs {
     /// readable.
     #[serde(default)]
     pub fields: Vec<String>,
+    /// Continuation token from a prior call's response; omit to start at the
+    /// first byte-budgeted page.
+    #[serde(default)]
+    pub continuation_token: Option<String>,
 }
 
 /// Arguments for planning one firewall policy write.
@@ -512,6 +548,11 @@ pub struct DeviceConfigListArgs {
     pub from: u64,
     /// Explicit positive page size.
     pub size: u32,
+    /// Continuation token from a prior call's response, for when this
+    /// `from`/`size` page itself exceeds the response byte budget; omit to
+    /// start at the first byte-budgeted sub-page.
+    #[serde(default)]
+    pub continuation_token: Option<String>,
 }
 
 /// Arguments for one device-image job.
@@ -569,6 +610,11 @@ pub struct DeviceCertificateListArgs {
     pub from: u64,
     /// Explicit positive page size.
     pub size: u32,
+    /// Continuation token from a prior call's response, for when this
+    /// `from`/`size` page itself exceeds the response byte budget; omit to
+    /// start at the first byte-budgeted sub-page.
+    #[serde(default)]
+    pub continuation_token: Option<String>,
 }
 
 /// Arguments for device license list.
@@ -584,6 +630,11 @@ pub struct DeviceLicenseListArgs {
     pub from: u64,
     /// Explicit positive page size.
     pub size: u32,
+    /// Continuation token from a prior call's response, for when this
+    /// `from`/`size` page itself exceeds the response byte budget; omit to
+    /// start at the first byte-budgeted sub-page.
+    #[serde(default)]
+    pub continuation_token: Option<String>,
 }
 
 /// Arguments for listing per-device firewall global settings.
@@ -600,6 +651,11 @@ pub struct DeviceGlobalSettingsListArgs {
     pub from: u64,
     /// Explicit positive page size (sent upstream as `limit`).
     pub size: u32,
+    /// Continuation token from a prior call's response, for when this
+    /// `from`/`size` page itself exceeds the response byte budget; omit to
+    /// start at the first byte-budgeted sub-page.
+    #[serde(default)]
+    pub continuation_token: Option<String>,
 }
 
 /// Arguments for one license.
@@ -625,6 +681,11 @@ pub struct CertificateListArgs {
     pub from: u64,
     /// Explicit positive page size.
     pub size: u32,
+    /// Continuation token from a prior call's response, for when this
+    /// `from`/`size` page itself exceeds the response byte budget; omit to
+    /// start at the first byte-budgeted sub-page.
+    #[serde(default)]
+    pub continuation_token: Option<String>,
 }
 
 /// Arguments for one policy.
@@ -657,6 +718,10 @@ pub struct ResourceListArgs {
     /// estate-scale list readable.
     #[serde(default)]
     pub fields: Vec<String>,
+    /// Continuation token from a prior call's response; omit to start at the
+    /// first byte-budgeted page.
+    #[serde(default)]
+    pub continuation_token: Option<String>,
 }
 
 /// Arguments for firewall policy rules list.
@@ -674,6 +739,11 @@ pub struct FirewallRulesListArgs {
     pub from: u64,
     /// Explicit positive page size.
     pub size: u32,
+    /// Continuation token from a prior call's response, for when this
+    /// `from`/`size` page itself exceeds the response byte budget; omit to
+    /// start at the first byte-budgeted sub-page.
+    #[serde(default)]
+    pub continuation_token: Option<String>,
 }
 
 /// Arguments for one firewall policy rule.
@@ -705,6 +775,11 @@ pub struct FirewallRuleGroupsListArgs {
     pub from: u64,
     /// Explicit positive page size.
     pub size: u32,
+    /// Continuation token from a prior call's response, for when this
+    /// `from`/`size` page itself exceeds the response byte budget; omit to
+    /// start at the first byte-budgeted sub-page.
+    #[serde(default)]
+    pub continuation_token: Option<String>,
 }
 
 /// Arguments for firewall policy hierarchy.
@@ -732,6 +807,11 @@ pub struct NatRulesListArgs {
     pub from: u64,
     /// Explicit positive page size.
     pub size: u32,
+    /// Continuation token from a prior call's response, for when this
+    /// `from`/`size` page itself exceeds the response byte budget; omit to
+    /// start at the first byte-budgeted sub-page.
+    #[serde(default)]
+    pub continuation_token: Option<String>,
 }
 
 /// Arguments for one NAT policy rule.
@@ -759,6 +839,11 @@ pub struct NatRuleGroupsListArgs {
     pub from: u64,
     /// Explicit positive page size.
     pub size: u32,
+    /// Continuation token from a prior call's response, for when this
+    /// `from`/`size` page itself exceeds the response byte budget; omit to
+    /// start at the first byte-budgeted sub-page.
+    #[serde(default)]
+    pub continuation_token: Option<String>,
 }
 
 /// Arguments for NAT policy hierarchy.
@@ -796,6 +881,11 @@ pub struct IpsRuleListArgs {
     pub from: u64,
     /// Explicit positive page size.
     pub size: u32,
+    /// Continuation token from a prior call's response, for when this
+    /// `from`/`size` page itself exceeds the response byte budget; omit to
+    /// start at the first byte-budgeted sub-page.
+    #[serde(default)]
+    pub continuation_token: Option<String>,
 }
 
 /// Arguments for one rule nested under one IPS profile.
@@ -823,6 +913,11 @@ pub struct EcfRuleSetListArgs {
     pub from: u64,
     /// Explicit positive page size.
     pub size: u32,
+    /// Continuation token from a prior call's response, for when this
+    /// `from`/`size` page itself exceeds the response byte budget; omit to
+    /// start at the first byte-budgeted sub-page.
+    #[serde(default)]
+    pub continuation_token: Option<String>,
 }
 
 /// Arguments for listing the rules of one rule set.
@@ -840,6 +935,11 @@ pub struct EcfRuleListArgs {
     pub from: u64,
     /// Explicit positive page size.
     pub size: u32,
+    /// Continuation token from a prior call's response, for when this
+    /// `from`/`size` page itself exceeds the response byte budget; omit to
+    /// start at the first byte-budgeted sub-page.
+    #[serde(default)]
+    pub continuation_token: Option<String>,
 }
 
 /// Arguments for listing IPsec profiles.
@@ -853,6 +953,11 @@ pub struct IpsecProfileListArgs {
     pub from: u64,
     /// Explicit positive page size.
     pub size: u32,
+    /// Continuation token from a prior call's response, for when this
+    /// `from`/`size` page itself exceeds the response byte budget; omit to
+    /// start at the first byte-budgeted sub-page.
+    #[serde(default)]
+    pub continuation_token: Option<String>,
 }
 
 /// Arguments for one IPsec profile.
@@ -876,6 +981,11 @@ pub struct TunnelListArgs {
     pub from: u64,
     /// Explicit positive page size.
     pub size: u32,
+    /// Continuation token from a prior call's response, for when this
+    /// `from`/`size` page itself exceeds the response byte budget; omit to
+    /// start at the first byte-budgeted sub-page.
+    #[serde(default)]
+    pub continuation_token: Option<String>,
 }
 
 /// Arguments for listing users and roles.
@@ -898,6 +1008,18 @@ pub struct UsersAndRolesListArgs {
     pub roles_from: u64,
     /// Explicit positive page size for roles.
     pub roles_size: u32,
+    /// Continuation token for the user sub-list from a prior call's
+    /// response, for when a `users_from`/`users_size` page itself exceeds
+    /// the response byte budget; omit to start at the first byte-budgeted
+    /// sub-page.
+    #[serde(default)]
+    pub users_continuation_token: Option<String>,
+    /// Continuation token for the role sub-list from a prior call's
+    /// response, for when a `roles_from`/`roles_size` page itself exceeds
+    /// the response byte budget; omit to start at the first byte-budgeted
+    /// sub-page.
+    #[serde(default)]
+    pub roles_continuation_token: Option<String>,
 }
 
 /// Arguments for one tunnel.
@@ -1138,6 +1260,7 @@ impl SdcHandler {
             Err(error) => Err(error),
         };
         let result = result.map(Self::apply_oob_drift_to_list);
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -1254,6 +1377,7 @@ impl SdcHandler {
             }
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -1317,6 +1441,7 @@ impl SdcHandler {
             }
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -1469,6 +1594,7 @@ impl SdcHandler {
             }
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -1528,6 +1654,7 @@ impl SdcHandler {
             Ok(page) => self.client.list_nat_policies(page, &cancellation).await,
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -1591,6 +1718,7 @@ impl SdcHandler {
             }
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -1659,6 +1787,7 @@ impl SdcHandler {
             }
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -1722,6 +1851,7 @@ impl SdcHandler {
             }
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -1785,6 +1915,7 @@ impl SdcHandler {
             }
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -1844,6 +1975,7 @@ impl SdcHandler {
             Ok(page) => self.client.list_nat_pools(page, &cancellation).await,
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -1878,6 +2010,8 @@ impl SdcHandler {
             }
             Err(error) => Err(error),
         };
+        let fields = (!args.fields.is_empty()).then_some(args.fields.as_slice());
+        let result = self.paginate_list(result, fields, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -1965,6 +2099,7 @@ impl SdcHandler {
                 .and_then(project_ca_certificates),
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -1999,6 +2134,7 @@ impl SdcHandler {
                 .and_then(project_local_certificates),
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -2034,6 +2170,7 @@ impl SdcHandler {
                 .and_then(project_ca_certificates),
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -2070,6 +2207,7 @@ impl SdcHandler {
                 .and_then(project_local_certificates),
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -2104,6 +2242,7 @@ impl SdcHandler {
                 .and_then(project_licenses),
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -2506,12 +2645,13 @@ impl SdcHandler {
             }
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
     #[tool(
         name = "list_users_and_roles",
-        description = "List tenant users and roles, metadata only: user_id, email, name, status, last_login, and role names; role UUID, name, capabilities, and whether it is predefined. SDC's IAM surface has no API-key concept and no created/created_by field on either resource, so neither is returned. Gated separately from a wildcard tool scope — a token must name this tool explicitly."
+        description = "List tenant users and roles, metadata only: user_id, email, name, status, last_login, and role names; role UUID, name, capabilities, and whether it is predefined. SDC's IAM surface has no API-key concept and no created/created_by field on either resource, so neither is returned. Gated separately from a wildcard tool scope — a token must name this tool explicitly. Each sub-list is additionally byte-budget paginated; pass users_continuation_token and/or roles_continuation_token back to fetch the next sub-page."
     )]
     async fn list_users_and_roles(
         &self,
@@ -2545,6 +2685,25 @@ impl SdcHandler {
                 .and_then(project_users_and_roles),
             Err(error) => Err(error),
         };
+        let budget_bytes = self.client.list_page_budget_bytes();
+        let result = result.and_then(|value| {
+            let Value::Object(mut outer) = value else {
+                return Err(SdcError::InvalidJson);
+            };
+            let users_envelope = outer.remove("users").ok_or(SdcError::InvalidJson)?;
+            let roles_envelope = outer.remove("roles").ok_or(SdcError::InvalidJson)?;
+            let (users_page, roles_page) = page_paired_lists(
+                &users_envelope,
+                "users",
+                args.users_continuation_token.as_deref(),
+                &roles_envelope,
+                "roles",
+                args.roles_continuation_token.as_deref(),
+                budget_bytes,
+            )
+            .map_err(SdcError::from)?;
+            Ok(serde_json::json!({ "users": users_page, "roles": roles_page }))
+        });
         Ok(finish_redacted(audit, result))
     }
 
@@ -2579,6 +2738,8 @@ impl SdcHandler {
             }
             Err(error) => Err(error),
         };
+        let fields = (!args.fields.is_empty()).then_some(args.fields.as_slice());
+        let result = self.paginate_list(result, fields, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -2642,6 +2803,7 @@ impl SdcHandler {
             }
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -2705,6 +2867,7 @@ impl SdcHandler {
             }
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -2768,6 +2931,7 @@ impl SdcHandler {
             }
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -2802,6 +2966,7 @@ impl SdcHandler {
             }
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -2832,6 +2997,7 @@ impl SdcHandler {
             Ok(page) => self.client.list_ipsec_profiles(page, &cancellation).await,
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -2891,6 +3057,7 @@ impl SdcHandler {
             Ok(page) => self.client.list_tunnels(page, &cancellation).await,
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
@@ -2965,6 +3132,7 @@ impl SdcHandler {
             Ok(page) => self.client.list_sites(page, &cancellation).await,
             Err(error) => Err(error),
         };
+        let result = self.paginate_list(result, None, args.continuation_token.as_deref());
         Ok(finish_redacted(audit, result))
     }
 
