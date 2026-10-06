@@ -22,10 +22,20 @@ pub struct ListPage {
     pub items: Vec<Value>,
     /// Items in this page.
     pub page_item_count: usize,
-    /// Items in the full source list.
+    /// Items in the fetched source list (i.e. this `from`/`size` call's
+    /// result), *not* the tenant-wide total. SDC's own total, when it
+    /// reports one, survives as an `upstream` field such as `count` or
+    /// `total` -- see [`ListPage::upstream`].
     pub total_item_count: usize,
     /// Opaque token to fetch the next page; `None` once the list is exhausted.
     pub continuation_token: Option<String>,
+    /// Every envelope field from the source value other than `items_key`,
+    /// carried through unchanged (e.g. `count`, `total`, `user_count`).
+    /// Without this, a caller cannot tell a complete from/size page from a
+    /// partial one once the raw `items` array is replaced by this page's
+    /// slice of it.
+    #[serde(flatten)]
+    pub upstream: Map<String, Value>,
 }
 
 /// A paging request could not be satisfied.
@@ -50,9 +60,12 @@ pub enum PageError {
 ///
 /// # Errors
 ///
-/// Returns [`PageError::NotAList`] if `value[items_key]` is missing or is not
-/// a JSON array, and [`PageError::InvalidContinuationToken`] if
+/// Returns [`PageError::NotAList`] if `value[items_key]` is present but is
+/// not a JSON array, and [`PageError::InvalidContinuationToken`] if
 /// `continuation_token` was not produced by a prior call to this function.
+/// A `value` with no `items_key` at all (an empty tenant's bare `{}`) is not
+/// an error: it pages as an empty list, matching the projection layer's
+/// treatment of the same shape.
 pub fn page_list(
     value: &Value,
     items_key: &'static str,
@@ -60,10 +73,11 @@ pub fn page_list(
     continuation_token: Option<&str>,
     budget_bytes: usize,
 ) -> Result<ListPage, PageError> {
-    let items = value
-        .get(items_key)
-        .and_then(Value::as_array)
-        .ok_or(PageError::NotAList(items_key))?;
+    let items: &[Value] = match value.get(items_key) {
+        Some(Value::Array(items)) => items,
+        Some(_) => return Err(PageError::NotAList(items_key)),
+        None => &[],
+    };
     let total_item_count = items.len();
     let offset = match continuation_token {
         Some(token) => decode_offset(token)?,
@@ -86,12 +100,48 @@ pub fn page_list(
     let next_offset = start + page.len();
     let continuation_token = (next_offset < total_item_count).then(|| encode_offset(next_offset));
 
+    let mut upstream = Map::new();
+    if let Value::Object(envelope) = value {
+        for (key, field_value) in envelope {
+            if key != items_key {
+                upstream.insert(key.clone(), field_value.clone());
+            }
+        }
+    }
+
     Ok(ListPage {
         page_item_count: page.len(),
         items: page,
         total_item_count,
         continuation_token,
+        upstream,
     })
+}
+
+/// Page two independent list envelopes against one shared byte budget, split
+/// evenly so neither alone can exhaust it.
+///
+/// `list_users_and_roles` returns users and roles as two unrelated arrays
+/// rather than one `items` list, so [`page_list`] alone cannot page it: each
+/// sub-list needs its own continuation token and its own share of the budget.
+///
+/// # Errors
+///
+/// Returns [`PageError`] if either envelope does not resolve to a JSON array
+/// under its key, or either continuation token is invalid.
+pub fn page_paired_lists(
+    first_envelope: &Value,
+    first_key: &'static str,
+    first_token: Option<&str>,
+    second_envelope: &Value,
+    second_key: &'static str,
+    second_token: Option<&str>,
+    budget_bytes: usize,
+) -> Result<(ListPage, ListPage), PageError> {
+    let half_budget = budget_bytes / 2;
+    let first = page_list(first_envelope, first_key, None, first_token, half_budget)?;
+    let second = page_list(second_envelope, second_key, None, second_token, half_budget)?;
+    Ok((first, second))
 }
 
 fn project_fields(item: &Value, fields: Option<&[String]>) -> Value {
@@ -222,8 +272,114 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_items_array_is_refused() {
-        let error = page_list(&json!({}), "items", None, None, 65_536).unwrap_err();
+    fn an_empty_tenants_bare_object_pages_as_an_empty_list_not_an_error() {
+        // An empty tenant's `{}` has no `items_key` at all. This must match
+        // the projection layer's treatment of the same shape rather than
+        // erroring: a fleet with zero CA certificates or zero licenses is a
+        // legitimate, common state, not malformed input.
+        let page = page_list(&json!({}), "items", None, None, 65_536).expect("pages");
+        assert_eq!(page.items, Vec::<Value>::new());
+        assert_eq!(page.total_item_count, 0);
+        assert_eq!(page.continuation_token, None);
+    }
+
+    #[test]
+    fn an_items_key_present_but_not_an_array_is_refused() {
+        // Unlike a missing key, a key that resolves to the wrong type cannot
+        // be an empty-tenant shape -- it means the response does not match
+        // what this module expects, so it must still fail closed.
+        let error =
+            page_list(&json!({"items": "not a list"}), "items", None, None, 65_536).unwrap_err();
         assert_eq!(error, PageError::NotAList("items"));
+    }
+
+    #[test]
+    fn upstream_envelope_fields_survive_paging() {
+        // SDC's own total (`count`, `total`, `user_count`, ...) must not be
+        // dropped just because `items_key` is replaced by this page's slice:
+        // otherwise a partial from/size page reads as a complete list.
+        let tenant = json!({"items": [{"uuid": "rule-0"}, {"uuid": "rule-1"}], "count": 10_000});
+        let page = page_list(&tenant, "items", None, None, 65_536).expect("pages");
+        assert_eq!(page.upstream.get("count"), Some(&json!(10_000)));
+        assert!(page.upstream.get("items").is_none());
+    }
+
+    fn users_envelope(count: usize) -> Value {
+        let users: Vec<Value> = (0..count)
+            .map(|index| json!({"user_id": format!("user-{index}"), "email": format!("user{index}@example.com"), "name": "User Name", "status": "active", "last_login": "2026-01-01T00:00:00Z", "role": []}))
+            .collect();
+        json!({"users": users})
+    }
+
+    fn roles_envelope(count: usize) -> Value {
+        let roles: Vec<Value> = (0..count)
+            .map(|index| json!({"uuid": format!("role-{index}"), "name": format!("role {index}"), "capabilities": ["read", "write"], "predefined": false}))
+            .collect();
+        json!({"roles": roles})
+    }
+
+    #[test]
+    fn page_paired_lists_pages_each_list_independently() {
+        let users = users_envelope(500);
+        let roles = roles_envelope(3);
+        let (users_page, roles_page) =
+            page_paired_lists(&users, "users", None, &roles, "roles", None, 8_192).expect("pages");
+        assert_eq!(roles_page.page_item_count, 3);
+        assert_eq!(roles_page.continuation_token, None);
+        assert!(
+            users_page.page_item_count < 500,
+            "500 users must not fit in half of an 8 KiB budget"
+        );
+        assert!(users_page.continuation_token.is_some());
+    }
+
+    #[test]
+    fn page_paired_lists_splits_the_budget_so_one_list_cannot_starve_the_other() {
+        // Both lists are individually large enough to exhaust the full budget
+        // alone; proving each gets at least one item back from its own half
+        // is what distinguishes this from a naive "page users with the whole
+        // budget, then roles with whatever (nothing) is left" bug.
+        let users = users_envelope(10_000);
+        let roles = roles_envelope(10_000);
+        let (users_page, roles_page) =
+            page_paired_lists(&users, "users", None, &roles, "roles", None, 8_192).expect("pages");
+        assert!(users_page.page_item_count >= 1);
+        assert!(roles_page.page_item_count >= 1);
+    }
+
+    #[test]
+    fn page_paired_lists_round_trips_continuation_tokens_independently() {
+        let users = users_envelope(10);
+        let roles = roles_envelope(10);
+        let (first_users, first_roles) =
+            page_paired_lists(&users, "users", None, &roles, "roles", None, 256)
+                .expect("first page");
+        let users_token = first_users.continuation_token.expect("more users remain");
+        // Roles already exhausted in the first page; its token must stay `None`
+        // rather than being coupled to the users side advancing.
+        let (second_users, second_roles) = page_paired_lists(
+            &users,
+            "users",
+            Some(&users_token),
+            &roles,
+            "roles",
+            first_roles.continuation_token.as_deref(),
+            256,
+        )
+        .expect("second page");
+        assert_eq!(
+            second_users.items[0]["user_id"],
+            format!("user-{}", first_users.page_item_count)
+        );
+        assert_eq!(second_roles.total_item_count, 10);
+    }
+
+    #[test]
+    fn page_paired_lists_refuses_a_key_present_but_not_an_array_on_either_side() {
+        let users = json!({"users": "not a list"});
+        let roles = roles_envelope(1);
+        let error =
+            page_paired_lists(&users, "users", None, &roles, "roles", None, 65_536).unwrap_err();
+        assert_eq!(error, PageError::NotAList("users"));
     }
 }

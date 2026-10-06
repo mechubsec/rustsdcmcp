@@ -12,6 +12,12 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 ## Unreleased
 
 ### Changed
+- **Every list tool with no upstream SDC pagination is now byte-budget
+  paginated, not just `list_sdc_config_versions` (#172).** Each tool's
+  arguments gained an optional `continuation_token`; `list_users_and_roles`
+  pages its users and roles sub-lists independently against split halves of
+  the shared budget, since they are two unrelated arrays rather than one
+  `items` list (MEC-982).
 - **Wholesale-redaction and denylist key-exemption rules now go through
   `mecmcp-redact`'s `Profile` hooks instead of a local implementation.**
   Behavior is unchanged; this is an internal consolidation onto the shared

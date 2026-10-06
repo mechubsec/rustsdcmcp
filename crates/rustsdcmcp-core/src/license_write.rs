@@ -814,7 +814,8 @@ mod tests {
             }),
         );
         let (base_url, server) = serve(app).await;
-        let client = SdcClient::from_test_parts(base_url, "test-secret".to_owned(), 64 * 1024, 100);
+        let client =
+            SdcClient::from_test_parts(base_url.as_str(), "test-secret".to_owned(), 64 * 1024, 100);
         let prepared = license_fixture(json!({
             "items": [{"uuid": "lic-old", "name": "as-prepared"}],
             "count": 1
@@ -878,7 +879,8 @@ mod tests {
             }),
         );
         let (base_url, server) = serve(app).await;
-        let client = SdcClient::from_test_parts(base_url, "test-secret".to_owned(), 64 * 1024, 100);
+        let client =
+            SdcClient::from_test_parts(base_url.as_str(), "test-secret".to_owned(), 64 * 1024, 100);
         let prepared = license_fixture(json!({
             "items": [{"uuid": "lic-1", "name": "existing"}],
             "count": 1
