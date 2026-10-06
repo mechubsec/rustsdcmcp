@@ -176,9 +176,15 @@ impl SdcClient {
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_test_parts(
-        base_url: Url,
+    /// Build a non-TLS client wired to a caller-chosen `base_url`, for tests
+    /// that stand up a mock HTTP server rather than calling a real tenant.
+    ///
+    /// Gated behind `test-support` (on unconditionally for this crate's own
+    /// `#[cfg(test)]`) so the non-TLS, unchecked-credential path this takes
+    /// can never reach a production binary.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_test_parts(
+        base_url: &str,
         credential: String,
         max_response_bytes: usize,
         max_page_size: u32,
@@ -209,7 +215,7 @@ impl SdcClient {
             reqwest::Client::new(),
         )
         .expect("test client");
-        client.base_url = base_url;
+        client.base_url = Url::parse(base_url).expect("test base url");
         client
     }
 
@@ -2672,7 +2678,12 @@ mod tests {
 
     fn client(base_url: Url, max_response_bytes: usize) -> SdcClient {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        SdcClient::from_test_parts(base_url, "test-secret".to_owned(), max_response_bytes, 100)
+        SdcClient::from_test_parts(
+            base_url.as_str(),
+            "test-secret".to_owned(),
+            max_response_bytes,
+            100,
+        )
     }
 
     #[tokio::test]

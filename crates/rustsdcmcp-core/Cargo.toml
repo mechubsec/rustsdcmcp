@@ -33,5 +33,11 @@ axum.workspace = true
 rustls.workspace = true
 tempfile = "3"
 
+[features]
+# Exposes `SdcClient::from_test_parts` to other workspace crates so their own
+# integration tests can point a real `SdcHandler` at a mock HTTP server. Not
+# for production use: it skips `SdcClient::new`'s TLS-only builder.
+test-support = []
+
 [lints]
 workspace = true

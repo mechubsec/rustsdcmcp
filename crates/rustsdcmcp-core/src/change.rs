@@ -1894,7 +1894,7 @@ mod tests {
         // If that check ever weakens, a mutated preview reaches deployment.
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client = SdcClient::from_test_parts(
-            Url::parse("https://example.invalid/").expect("url"),
+            "https://example.invalid/",
             "test-secret".to_owned(),
             64 * 1024,
             100,
@@ -1930,7 +1930,7 @@ mod tests {
         // that field, not expected_digest.
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client = SdcClient::from_test_parts(
-            Url::parse("https://example.invalid/").expect("url"),
+            "https://example.invalid/",
             "test-secret".to_owned(),
             64 * 1024,
             100,
@@ -1993,7 +1993,7 @@ mod tests {
         let (base_url, server) = serve(app).await;
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client =
-            SdcClient::from_test_parts(base_url.clone(), "test-secret".to_owned(), 64 * 1024, 100);
+            SdcClient::from_test_parts(base_url.as_str(), "test-secret".to_owned(), 64 * 1024, 100);
         let manager = ChangeManager::load(
             client,
             "tenant-a",
@@ -2082,7 +2082,7 @@ mod tests {
     async fn oob_kinds_stay_planned_under_lab_mode_and_apply_refuses_them() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client = SdcClient::from_test_parts(
-            Url::parse("https://example.invalid/").expect("url"),
+            "https://example.invalid/",
             "test-secret".to_owned(),
             64 * 1024,
             100,
@@ -2239,7 +2239,7 @@ mod tests {
         let (base_url, server) = serve(app).await;
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client =
-            SdcClient::from_test_parts(base_url.clone(), "test-secret".to_owned(), 64 * 1024, 100);
+            SdcClient::from_test_parts(base_url.as_str(), "test-secret".to_owned(), 64 * 1024, 100);
         let manager = ChangeManager::load(
             client,
             "tenant-a",
@@ -2343,7 +2343,7 @@ mod tests {
         let (base_url, server) = serve(app).await;
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client =
-            SdcClient::from_test_parts(base_url.clone(), "test-secret".to_owned(), 64 * 1024, 100);
+            SdcClient::from_test_parts(base_url.as_str(), "test-secret".to_owned(), 64 * 1024, 100);
 
         let dir = tempfile::tempdir().expect("tempdir");
         let state_path = dir.path().join("changeset-state.json");
@@ -2498,7 +2498,7 @@ mod tests {
         // only reachable pre-commit, so reporting success is accurate.
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client = SdcClient::from_test_parts(
-            Url::parse("https://example.invalid/").expect("url"),
+            "https://example.invalid/",
             "test-secret".to_owned(),
             64 * 1024,
             100,
@@ -2522,7 +2522,7 @@ mod tests {
     async fn object_write_stage_rejects_a_tampered_envelope() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client = SdcClient::from_test_parts(
-            Url::parse("https://example.invalid/").expect("url"),
+            "https://example.invalid/",
             "test-secret".to_owned(),
             64 * 1024,
             100,
@@ -2560,7 +2560,8 @@ mod tests {
             get(|| async { Json(json!({"uuid": "addr-1", "name": "changed-by-someone-else"})) }),
         );
         let (base_url, server) = serve(app).await;
-        let client = SdcClient::from_test_parts(base_url, "test-secret".to_owned(), 64 * 1024, 100);
+        let client =
+            SdcClient::from_test_parts(base_url.as_str(), "test-secret".to_owned(), 64 * 1024, 100);
         let prepared = object_fixture(json!({"uuid": "addr-1", "name": "as-prepared"}));
         let transaction = SdcObjectTransaction::new(
             client,
@@ -2616,7 +2617,8 @@ mod tests {
             get(|| async { (axum::http::StatusCode::NOT_FOUND, Json(json!({}))) }),
         );
         let (base_url, server) = serve(app).await;
-        let client = SdcClient::from_test_parts(base_url, "test-secret".to_owned(), 64 * 1024, 100);
+        let client =
+            SdcClient::from_test_parts(base_url.as_str(), "test-secret".to_owned(), 64 * 1024, 100);
         let prepared = object_fixture(json!({"uuid": "addr-1", "name": "as-prepared"}));
         let transaction = SdcObjectTransaction::new(
             client,
@@ -2647,7 +2649,8 @@ mod tests {
             get(|| async { Json(json!({"uuid": "addr-1", "name": "as-prepared"})) }),
         );
         let (base_url, server) = serve(app).await;
-        let client = SdcClient::from_test_parts(base_url, "test-secret".to_owned(), 64 * 1024, 100);
+        let client =
+            SdcClient::from_test_parts(base_url.as_str(), "test-secret".to_owned(), 64 * 1024, 100);
         let prepared = object_fixture(json!({"uuid": "addr-1", "name": "as-prepared"}));
         let transaction = SdcObjectTransaction::new(
             client,
@@ -2687,7 +2690,7 @@ mod tests {
         );
         let (base_url, server) = serve(app).await;
         let client =
-            SdcClient::from_test_parts(base_url.clone(), "test-secret".to_owned(), 64 * 1024, 100);
+            SdcClient::from_test_parts(base_url.as_str(), "test-secret".to_owned(), 64 * 1024, 100);
         let manager = ChangeManager::load(
             client,
             "tenant-a",
@@ -2758,7 +2761,7 @@ mod tests {
         );
         let (base_url, server) = serve(app).await;
         let client =
-            SdcClient::from_test_parts(base_url.clone(), "test-secret".to_owned(), 64 * 1024, 100);
+            SdcClient::from_test_parts(base_url.as_str(), "test-secret".to_owned(), 64 * 1024, 100);
         let manager = ChangeManager::load(
             client,
             "tenant-a",
@@ -2828,7 +2831,7 @@ mod tests {
         );
         let (base_url, server) = serve(app).await;
         let client =
-            SdcClient::from_test_parts(base_url.clone(), "test-secret".to_owned(), 64 * 1024, 100);
+            SdcClient::from_test_parts(base_url.as_str(), "test-secret".to_owned(), 64 * 1024, 100);
         let manager = ChangeManager::load(
             client.clone(),
             "tenant-a",
@@ -2934,7 +2937,7 @@ mod tests {
 
         let (base_url, server) = serve(app).await;
         let client =
-            SdcClient::from_test_parts(base_url.clone(), "test-secret".to_owned(), 64 * 1024, 100);
+            SdcClient::from_test_parts(base_url.as_str(), "test-secret".to_owned(), 64 * 1024, 100);
         let manager = ChangeManager::load(
             client.clone(),
             "tenant-a",
@@ -3013,7 +3016,7 @@ mod tests {
         let (base_url, server) = serve(app).await;
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client =
-            SdcClient::from_test_parts(base_url.clone(), "test-secret".to_owned(), 64 * 1024, 100);
+            SdcClient::from_test_parts(base_url.as_str(), "test-secret".to_owned(), 64 * 1024, 100);
         let manager = ChangeManager::load(
             client,
             "tenant-a",
@@ -3059,7 +3062,7 @@ mod tests {
         // so erroring here makes a wedged operation permanently unrecoverable.
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client = SdcClient::from_test_parts(
-            "https://sdc.invalid/".parse().expect("test url"),
+            "https://sdc.invalid/",
             "test-secret".to_owned(),
             64 * 1024,
             100,
@@ -3106,7 +3109,7 @@ mod tests {
         let (base_url, server) = serve(app).await;
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client =
-            SdcClient::from_test_parts(base_url.clone(), "test-secret".to_owned(), 64 * 1024, 100);
+            SdcClient::from_test_parts(base_url.as_str(), "test-secret".to_owned(), 64 * 1024, 100);
         let manager = ChangeManager::load(
             client,
             "tenant-a",
@@ -3173,7 +3176,7 @@ mod tests {
         );
         let (base_url, server) = serve(app).await;
         let client =
-            SdcClient::from_test_parts(base_url.clone(), "test-secret".to_owned(), 64 * 1024, 100);
+            SdcClient::from_test_parts(base_url.as_str(), "test-secret".to_owned(), 64 * 1024, 100);
         let manager = ChangeManager::load(
             client.clone(),
             "tenant-a",
