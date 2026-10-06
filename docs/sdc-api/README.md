@@ -777,6 +777,34 @@ Recorded here so the next person does not repeat the search. If Juniper later
 exposes an equivalent under `/api/v1` or `/api/v2`, the semantics above are the
 ground truth for what the buttons do.
 
+#### Read-side advisory: surfacing the state, not resolving it
+
+This server cannot call the portal's resolution endpoints (above), but
+`list_sdc_devices` and `get_sdc_device` do read `device_config_state` from
+`GET /api/v1/devices`, so the drift this section describes is at least
+visible to a caller before the "no API equivalent" limit applies to it.
+
+Both tools attach an `oob_drift` advisory block to each device:
+
+```json
+"oob_drift": {
+  "state": "out_of_band_changed",
+  "raw_device_config_state": "OUT_OF_BAND_CHANGED",
+  "resolution_available_here": false,
+  "resolution_paths": [{"action": "portal", "where": "SDC portal → Devices → Resolve out-of-band changes", ...}],
+  "not_a_remedy": ["apply_sdc_device_inventory_sync — inventory only, leaves this state untouched"]
+}
+```
+
+`state` is `none` when the field is absent, `out_of_band_changed` on an exact
+match, and `unknown` for every other value — including a present-but-non-string
+field, which is treated the same as an unrecognized string rather than as
+absent. `resolution_available_here` is a hardcoded `false`: it does not change
+until this server can reach the portal's endpoints, which is the limit this
+whole section exists to document. The block adds no device configuration to
+the read — only the state string, a length-capped and ASCII-filtered copy of
+the raw value, and the static advisory text above.
+
 ## Still unverified
 
 Not answered by the spec; do not write code that assumes an answer:

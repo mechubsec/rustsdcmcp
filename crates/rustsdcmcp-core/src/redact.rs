@@ -163,16 +163,23 @@ pub fn redact_rma_state(mut value: Value) -> Value {
     value
 }
 
-/// Clamp a string to a maximum length, removing control characters.
+/// Clamp a string to a maximum length (in bytes), keeping only ASCII
+/// printable graphic characters and spaces.
+///
+/// This is an allowlist, not a control-character blacklist: the upstream
+/// value is an enum-like token, so dropping everything outside
+/// `is_ascii_graphic() || ' '` also removes bidi/format characters (for
+/// example U+202E RIGHT-TO-LEFT OVERRIDE, Unicode category Cf, which
+/// `char::is_control` does not flag) and ANSI escape sequences, not just
+/// C0/C1 control bytes.
 fn clamp_and_sanitize(s: &str, max_len: usize) -> String {
     let mut result = String::new();
     let mut len = 0;
     for c in s.chars() {
-        // Skip control characters (keep printable space + newline + tab)
-        if c.is_control() && c != '\n' && c != '\t' {
+        if !(c.is_ascii_graphic() || c == ' ') {
             continue;
         }
-        if len >= max_len {
+        if len + c.len_utf8() > max_len {
             break;
         }
         len += c.len_utf8();
@@ -185,8 +192,10 @@ fn clamp_and_sanitize(s: &str, max_len: usize) -> String {
 ///
 /// Computes an advisory oob_drift block based on the device_config_state field:
 /// - absent -> state: "none"
-/// - "OUT_OF_BAND_CHANGED" -> state: "out_of_band_changed"
-/// - anything else non-empty -> state: "unknown" (with raw value preserved)
+/// - `"OUT_OF_BAND_CHANGED"` -> state: "out_of_band_changed" (raw value preserved)
+/// - any other string -> state: "unknown" (raw value preserved)
+/// - present but not a string (unexpected upstream shape) -> state: "unknown"
+///   (no raw value to report)
 ///
 /// The block contains only advisory text; no device configuration.
 #[must_use]
@@ -194,17 +203,19 @@ pub fn apply_oob_drift(mut value: Value) -> Value {
     use serde_json::Map;
 
     if let Some(obj) = value.as_object_mut() {
-        // Get the raw device_config_state
-        let raw_state = obj.get("device_config_state").and_then(|v| v.as_str());
-
-        // Clamp and sanitize the raw state
-        let safe_raw = raw_state.map(|s| clamp_and_sanitize(s, 256));
-
-        // Determine the state enum-like value
-        let state = match raw_state {
-            None => "none",
-            Some("OUT_OF_BAND_CHANGED") => "out_of_band_changed",
-            Some(_) => "unknown",
+        // Determine the state enum-like value and the sanitized raw value to
+        // report alongside it. Matched against the field's `Value`, not a
+        // `&str` projection: a present-but-non-string field (for example a
+        // stray `null` or number from an upstream API change) must not
+        // collapse into the same "none" the spec reserves for an absent
+        // field — that direction fails open on a drift signal.
+        let (state, safe_raw) = match obj.get("device_config_state") {
+            None => ("none", None),
+            Some(Value::String(s)) if s == "OUT_OF_BAND_CHANGED" => {
+                ("out_of_band_changed", Some(clamp_and_sanitize(s, 256)))
+            }
+            Some(Value::String(s)) => ("unknown", Some(clamp_and_sanitize(s, 256))),
+            Some(_) => ("unknown", None),
         };
 
         // Build the oob_drift block
@@ -760,5 +771,98 @@ mod tests {
                 .expect("should be string"),
             "connected"
         );
+    }
+
+    /// F1 (MEC-1995 review of #216): a present-but-non-string
+    /// `device_config_state` must not read as `"none"` — that's the value
+    /// reserved for the field being absent, and a drift indicator that fails
+    /// open to "no drift" on an unparseable upstream value is the wrong
+    /// direction to be wrong in.
+    #[test]
+    fn apply_oob_drift_non_string_state_is_unknown_not_none() {
+        for raw in [json!(null), json!(7), json!({"x": 1}), json!([1, 2])] {
+            let device = json!({"device_config_state": raw.clone()});
+            let result = apply_oob_drift(device);
+            let drift = result.get("oob_drift").expect("oob_drift present");
+            assert_eq!(
+                drift.get("state").unwrap().as_str().unwrap(),
+                "unknown",
+                "raw value {raw:?} must not collapse to \"none\""
+            );
+            assert!(drift.get("raw_device_config_state").unwrap().is_null());
+        }
+    }
+
+    /// F1: absent is still the one case that reads `"none"`.
+    #[test]
+    fn apply_oob_drift_absent_state_is_none() {
+        let device = json!({"uuid": "x"});
+        let result = apply_oob_drift(device);
+        let drift = result.get("oob_drift").expect("oob_drift present");
+        assert_eq!(drift.get("state").unwrap().as_str().unwrap(), "none");
+    }
+
+    /// Spoofing check: a pre-existing upstream `oob_drift` key must be
+    /// overwritten with the computed block, never trusted as-is.
+    #[test]
+    fn apply_oob_drift_overwrites_a_preexisting_upstream_block() {
+        let device = json!({
+            "device_config_state": "OUT_OF_BAND_CHANGED",
+            "oob_drift": {"state": "none"}
+        });
+        let result = apply_oob_drift(device);
+        let drift = result.get("oob_drift").expect("oob_drift present");
+        assert_eq!(
+            drift.get("state").unwrap().as_str().unwrap(),
+            "out_of_band_changed"
+        );
+    }
+
+    /// F2 (MEC-1995 review of #216): bidi/format characters must not survive
+    /// the sanitizer. U+202E is Unicode category Cf (format), which
+    /// `char::is_control` does not flag, so the old control-char blacklist
+    /// let it through.
+    #[test]
+    fn clamp_and_sanitize_strips_bidi_override_characters() {
+        let out = clamp_and_sanitize("A\u{202E}B", 256);
+        assert_eq!(out, "AB");
+    }
+
+    /// F2: newlines and tabs were explicitly kept by the old blacklist;
+    /// the allowlist drops them too, since the field is a single enum-like
+    /// token, not a text block.
+    #[test]
+    fn clamp_and_sanitize_strips_newlines_and_tabs() {
+        let out = clamp_and_sanitize("A\nB\tC", 256);
+        assert_eq!(out, "ABC");
+    }
+
+    /// F2: an ANSI escape sequence is only partially removed by a
+    /// control-char blacklist (the ESC byte is a control character, but the
+    /// `[31m` that follows it is plain printable text).
+    #[test]
+    fn clamp_and_sanitize_strips_the_esc_control_byte() {
+        let out = clamp_and_sanitize("A\u{1b}[31mB", 256);
+        // The allowlist drops the ESC control byte. `[31m` is plain ASCII
+        // graphic text, so it is not an escape sequence once ESC is gone —
+        // the allowlist does not parse ANSI sequences as a unit.
+        assert_eq!(out, "A[31mB");
+    }
+
+    /// F2: the length check used to run *before* the push, so a multi-byte
+    /// character straddling the cap could leave the result up to
+    /// `max_len + char_len - 1` bytes long. Confirm the cap is now a hard
+    /// byte-length ceiling.
+    #[test]
+    fn clamp_and_sanitize_enforces_a_hard_byte_length_cap() {
+        let input = "x".repeat(300);
+        let out = clamp_and_sanitize(&input, 256);
+        assert_eq!(out.len(), 256);
+    }
+
+    #[test]
+    fn clamp_and_sanitize_keeps_plain_ascii_text() {
+        let out = clamp_and_sanitize("OUT_OF_BAND_CHANGED", 256);
+        assert_eq!(out, "OUT_OF_BAND_CHANGED");
     }
 }

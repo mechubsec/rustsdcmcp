@@ -3596,6 +3596,48 @@ mod tests {
         assert!(!serialized.contains("hunter2-secret"), "{serialized}");
     }
 
+    /// F4 (MEC-1995 review of #216): the list path has its own envelope
+    /// walk (`apply_oob_drift_to_list`), separate from the single-device
+    /// path. Only the single-device fn had test coverage; a regression here
+    /// (wrong envelope key, wrong item replacement) would silently drop the
+    /// block from every `list_sdc_devices` response without failing any
+    /// other test.
+    #[test]
+    fn apply_oob_drift_to_list_annotates_every_item_with_mixed_states() {
+        let listed = serde_json::json!({
+            "items": [
+                {"uuid": "d1", "device_config_state": "OUT_OF_BAND_CHANGED"},
+                {"uuid": "d2"},
+                {"uuid": "d3", "device_config_state": "SOMETHING_ELSE"},
+            ],
+            "count": 3,
+        });
+
+        let out = SdcHandler::apply_oob_drift_to_list(listed);
+
+        let items = out["items"].as_array().expect("items array");
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0]["oob_drift"]["state"], "out_of_band_changed");
+        assert_eq!(items[1]["oob_drift"]["state"], "none");
+        assert_eq!(items[2]["oob_drift"]["state"], "unknown");
+        // The envelope's own fields are untouched.
+        assert_eq!(out["count"], 3);
+    }
+
+    /// An envelope with no `items` array (or a non-array `items`) must be
+    /// returned unchanged rather than panicking.
+    #[test]
+    fn apply_oob_drift_to_list_tolerates_a_missing_items_array() {
+        let empty = serde_json::json!({});
+        assert_eq!(SdcHandler::apply_oob_drift_to_list(empty.clone()), empty);
+
+        let not_an_array = serde_json::json!({"items": "unexpected"});
+        assert_eq!(
+            SdcHandler::apply_oob_drift_to_list(not_an_array.clone()),
+            not_an_array
+        );
+    }
+
     fn caller(targets: ScopeSet, tools: ScopeSet) -> CallerCtx<NoGrant> {
         CallerCtx {
             token_name: "alice".to_owned(),
