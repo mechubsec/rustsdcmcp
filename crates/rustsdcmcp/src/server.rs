@@ -19,7 +19,7 @@ use rmcp::{
 use rustsdcmcp_core::{
     ChangeManager, DeviceConfigSection, ImageJob, ListRequest, NatWriteOperation,
     ObjectWriteAction, PolicyOperation, ResourceKind, SdcClient, SdcError, WritableResource,
-    page_list, project_ca_certificates, project_license, project_licenses,
+    apply_oob_drift, page_list, project_ca_certificates, project_license, project_licenses,
     project_local_certificates, project_users_and_roles, redact_rma_state, redact_secrets,
 };
 use schemars::JsonSchema;
@@ -1137,7 +1137,21 @@ impl SdcHandler {
             Ok(page) => self.client.list_devices(page, &cancellation).await,
             Err(error) => Err(error),
         };
+        let result = result.map(Self::apply_oob_drift_to_list);
         Ok(finish_redacted(audit, result))
+    }
+
+    /// Apply oob_drift to each device in a list response.
+    fn apply_oob_drift_to_list(mut value: Value) -> Value {
+        if let Value::Object(ref mut obj) = value
+            && let Some(items) = obj.get_mut("items")
+            && let Some(items_arr) = items.as_array_mut()
+        {
+            for item in items_arr.iter_mut() {
+                *item = apply_oob_drift(std::mem::replace(item, Value::Null));
+            }
+        }
+        value
     }
 
     #[tool(
@@ -1156,12 +1170,12 @@ impl SdcHandler {
             audit.deny("scope");
             return Ok(tool_error(error));
         }
-        Ok(finish_redacted(
-            audit,
-            self.client
-                .get_device(&args.device_uuid, &cancellation)
-                .await,
-        ))
+        let result = self
+            .client
+            .get_device(&args.device_uuid, &cancellation)
+            .await
+            .map(apply_oob_drift);
+        Ok(finish_redacted(audit, result))
     }
 
     #[tool(

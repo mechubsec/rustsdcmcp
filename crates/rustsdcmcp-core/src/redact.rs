@@ -1,4 +1,4 @@
-//! Credential redaction for tool output.
+//! Credential redaction and device oob_drift computation for tool output.
 //!
 //! Applied at the MCP tool boundary only, never inside [`crate::SdcClient`],
 //! for the reason `projection.rs` gives: change-control reads the same
@@ -163,8 +163,100 @@ pub fn redact_rma_state(mut value: Value) -> Value {
     value
 }
 
+/// Clamp a string to a maximum length, removing control characters.
+fn clamp_and_sanitize(s: &str, max_len: usize) -> String {
+    let mut result = String::new();
+    let mut len = 0;
+    for c in s.chars() {
+        // Skip control characters (keep printable space + newline + tab)
+        if c.is_control() && c != '\n' && c != '\t' {
+            continue;
+        }
+        if len >= max_len {
+            break;
+        }
+        len += c.len_utf8();
+        result.push(c);
+    }
+    result
+}
+
+/// Apply oob_drift computation to a device value.
+///
+/// Computes an advisory oob_drift block based on the device_config_state field:
+/// - absent -> state: "none"
+/// - "OUT_OF_BAND_CHANGED" -> state: "out_of_band_changed"
+/// - anything else non-empty -> state: "unknown" (with raw value preserved)
+///
+/// The block contains only advisory text; no device configuration.
+#[must_use]
+pub fn apply_oob_drift(mut value: Value) -> Value {
+    use serde_json::Map;
+
+    if let Some(obj) = value.as_object_mut() {
+        // Get the raw device_config_state
+        let raw_state = obj.get("device_config_state").and_then(|v| v.as_str());
+
+        // Clamp and sanitize the raw state
+        let safe_raw = raw_state.map(|s| clamp_and_sanitize(s, 256));
+
+        // Determine the state enum-like value
+        let state = match raw_state {
+            None => "none",
+            Some("OUT_OF_BAND_CHANGED") => "out_of_band_changed",
+            Some(_) => "unknown",
+        };
+
+        // Build the oob_drift block
+        let mut oob_drift = Map::new();
+
+        oob_drift.insert("state".to_string(), Value::String(state.to_string()));
+        oob_drift.insert(
+            "raw_device_config_state".to_string(),
+            safe_raw.map_or(Value::Null, Value::String),
+        );
+        oob_drift.insert("resolution_available_here".to_string(), Value::Bool(false));
+
+        // resolution_paths - always the portal action
+        let mut portal_path = Map::new();
+        portal_path.insert("action".to_string(), Value::String("portal".to_string()));
+        portal_path.insert(
+            "where".to_string(),
+            Value::String("SDC portal → Devices → Resolve out-of-band changes".to_string()),
+        );
+        portal_path.insert(
+            "accept_means".to_string(),
+            Value::String(
+                "SDC imports the device's change; the device is not modified".to_string(),
+            ),
+        );
+        portal_path.insert(
+            "reject_means".to_string(),
+            Value::String(
+                "the change is DELETED from the device; SDC never held a copy".to_string(),
+            ),
+        );
+        let resolution_paths = vec![Value::Object(portal_path)];
+        oob_drift.insert(
+            "resolution_paths".to_string(),
+            Value::Array(resolution_paths),
+        );
+
+        // not_a_remedy - list actions that don't resolve this
+        let not_a_remedy = vec![Value::String(
+            "apply_sdc_device_inventory_sync — inventory only, leaves this state untouched"
+                .to_string(),
+        )];
+        oob_drift.insert("not_a_remedy".to_string(), Value::Array(not_a_remedy));
+
+        obj.insert("oob_drift".to_string(), Value::Object(oob_drift));
+    }
+    value
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
     #[test]
     fn paging_tokens_survive_redaction() {
         // Percy B1 (MEC-440): the compound `*token` match redacted #172's
@@ -556,5 +648,117 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    #[test]
+    fn apply_oob_drift_adds_block_to_device_with_no_state() {
+        let device = serde_json::json!({
+            "uuid": "12345678-1234-1234-1234-123456789abc"
+        });
+
+        let result = apply_oob_drift(device);
+
+        assert!(result.get("oob_drift").is_some());
+        let drift = result
+            .get("oob_drift")
+            .expect("oob_drift field should be present");
+        assert_eq!(
+            drift
+                .get("state")
+                .expect("state field should be present")
+                .as_str()
+                .expect("state should be a string"),
+            "none"
+        );
+        assert!(drift.get("raw_device_config_state").unwrap().is_null());
+    }
+
+    #[test]
+    fn apply_oob_drift_adds_block_to_device_with_out_of_band_state() {
+        let device = serde_json::json!({
+            "uuid": "12345678-1234-1234-1234-123456789abc",
+            "device_config_state": "OUT_OF_BAND_CHANGED"
+        });
+
+        let result = apply_oob_drift(device);
+
+        let drift = result
+            .get("oob_drift")
+            .expect("oob_drift field should be present");
+        assert_eq!(
+            drift
+                .get("state")
+                .expect("state field should be present")
+                .as_str()
+                .expect("state should be a string"),
+            "out_of_band_changed"
+        );
+        assert_eq!(
+            drift
+                .get("raw_device_config_state")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "OUT_OF_BAND_CHANGED"
+        );
+    }
+
+    #[test]
+    fn apply_oob_drift_adds_block_to_device_with_other_state() {
+        let device = serde_json::json!({
+            "uuid": "12345678-1234-1234-1234-123456789abc",
+            "device_config_state": "some_other_value"
+        });
+
+        let result = apply_oob_drift(device);
+
+        let drift = result
+            .get("oob_drift")
+            .expect("oob_drift field should be present");
+        assert_eq!(
+            drift
+                .get("state")
+                .expect("state field should be present")
+                .as_str()
+                .expect("state should be a string"),
+            "unknown"
+        );
+        assert_eq!(
+            drift
+                .get("raw_device_config_state")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "some_other_value"
+        );
+    }
+
+    #[test]
+    fn apply_oob_drift_preserves_other_fields() {
+        let device = serde_json::json!({
+            "uuid": "12345678-1234-1234-1234-123456789abc",
+            "name": "test-device",
+            "device_config_state": "OUT_OF_BAND_CHANGED",
+            "status": "connected"
+        });
+
+        let result = apply_oob_drift(device);
+
+        assert_eq!(
+            result
+                .get("name")
+                .expect("name field should be present")
+                .as_str()
+                .expect("should be string"),
+            "test-device"
+        );
+        assert_eq!(
+            result
+                .get("status")
+                .expect("status field should be present")
+                .as_str()
+                .expect("should be string"),
+            "connected"
+        );
     }
 }
