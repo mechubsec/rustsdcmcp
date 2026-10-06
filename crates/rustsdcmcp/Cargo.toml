@@ -43,7 +43,7 @@ uuid.workspace = true
 # Enables SdcClient::from_test_parts for handler-level tests that drive a
 # real SdcHandler against a mock HTTP server instead of calling `page_list`
 # directly (see MEC-2062 F4).
-rustsdcmcp-core = { path = "../rustsdcmcp-core", features = ["test-support"] }
+rustsdcmcp-core = { version = "0.0.5", path = "../rustsdcmcp-core", features = ["test-support"] }
 
 [lints]
 workspace = true
