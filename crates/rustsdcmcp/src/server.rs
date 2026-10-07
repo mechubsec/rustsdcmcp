@@ -1240,7 +1240,7 @@ impl SdcHandler {
 
     #[tool(
         name = "list_sdc_devices",
-        description = "List managed SDC devices with bounded pagination."
+        description = "List managed SDC devices with bounded pagination. Each device includes an oob_drift advisory. A missing device_config_state is not_reported, not an in-sync result; none is reserved for a documented in-sync value, and device_sync_status IN_SYNC does not prove the device matches SDC."
     )]
     async fn list_sdc_devices(
         &self,
@@ -1285,7 +1285,7 @@ impl SdcHandler {
 
     #[tool(
         name = "get_sdc_device",
-        description = "Get one managed SDC device by UUID."
+        description = "Get one managed SDC device by UUID. The device includes an oob_drift advisory. A missing device_config_state is not_reported, not an in-sync result; none is reserved for a documented in-sync value, and device_sync_status IN_SYNC does not prove the device matches SDC."
     )]
     async fn get_sdc_device(
         &self,
@@ -3287,7 +3287,7 @@ impl SdcHandler {
 
     #[tool(
         name = "prepare_sdc_policy_deploy",
-        description = "Preview SDC policy target changes and create a digest-bound change set. This does not deploy. A deploy has been observed committing a deletion its preview did not disclose (#66), so treat the preview as a lower bound on what will change, not a complete statement of it."
+        description = "Preview SDC policy target changes and create a digest-bound change set. This does not deploy. A deploy has been observed committing a deletion its preview did not disclose (#66), so treat the preview as a lower bound on what will change, not a complete statement of it. Drift detection relies on SDC's device_config_state flag: an absent or unrecognized flag does not prove the device matches SDC, and a deploy can remove device-local configuration SDC does not model."
     )]
     async fn prepare_sdc_policy_deploy(
         &self,
@@ -3799,7 +3799,7 @@ mod tests {
         let items = out["items"].as_array().expect("items array");
         assert_eq!(items.len(), 3);
         assert_eq!(items[0]["oob_drift"]["state"], "out_of_band_changed");
-        assert_eq!(items[1]["oob_drift"]["state"], "none");
+        assert_eq!(items[1]["oob_drift"]["state"], "not_reported");
         assert_eq!(items[2]["oob_drift"]["state"], "unknown");
         // The envelope's own fields are untouched.
         assert_eq!(out["count"], 3);

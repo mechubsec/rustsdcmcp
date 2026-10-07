@@ -9,6 +9,14 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
+## Unreleased
+
+### Fixed
+- Device drift advisories no longer treat a missing upstream report as an in-sync result. (#228)
+
+### Changed
+- The policy-deploy preview notes that drift detection relies on the upstream report.
+
 ## `v0.1.0` — 2026-10-07
 
 ### Documentation
