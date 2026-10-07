@@ -59,16 +59,19 @@ commit `ea81805d2b4b97df9bdd3f70423e047524896a3d` with `mecmcp` `v0.5.0`. The
 transport and scope preflight were replaced afterwards in `e28d0cc` and
 `369f9bb`, so that result no longer speaks for current `main`; no lab SDC
 tenant was available to repeat it live. On 2026-10-06, against commit
-`2036523` with `mecmcp` `v0.26.0`, the automated integration suite that
-encodes the same properties was re-run instead — `cargo test --workspace`,
-258 passed, 0 failed, covering: credential-based startup tenant validation
-(`crates/rustsdcmcp-core/tests/contracts.rs`), a scoped grant exposing exactly
-its permitted tools and no write tools and `401` for missing and invalid
-bearers (`crates/rustsdcmcp/tests/http_boundary.rs`), and HMAC-redaction of
-sensitive fields (`crates/rustsdcmcp-core/src/redact.rs` unit tests). This
-confirms the properties hold at the integration-test level on current `main`;
-it is not a substitute for the live-tenant exercise and does not re-establish
-one.
+`2036523` with `mecmcp` `v0.26.0`, the automated integration suite was re-run
+instead — `cargo test --workspace`, 258 passed, 0 failed — which covers:
+requests with a missing bearer are refused
+(`crates/rustsdcmcp/tests/http_boundary.rs::router_requires_bearer`),
+out-of-scope tenants are refused
+(`crates/rustsdcmcp/tests/http_boundary.rs::out_of_scope_tenant_is_refused`),
+exact tool and tenant scope enforcement with read/write tool disjointness
+(`crates/rustsdcmcp/src/server.rs` scope unit tests,
+`crates/rustsdcmcp/tests/tool_contract.rs`), and secret-key redaction of
+responses (`crates/rustsdcmcp-core/src/redact.rs` unit tests). The remaining
+properties from the 2026-08-07 live audit have not been re-verified on
+current `main`; this run is not a substitute for the live-tenant exercise and
+does not re-establish one.
 
 Observed response shapes and the remaining endpoint questions are tracked in
 [`docs/sdc-api/README.md`](docs/sdc-api/README.md#still-unverified).
