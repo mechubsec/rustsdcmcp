@@ -68,6 +68,12 @@ wrong layer. Ask for the current address rather than copying one from a doc.
 Point the local MCP client at `http://127.0.0.1:30032/mcp` while the tunnel is
 open.
 
+Use `token set-scopes --server-pid <pid>` only after the server is listening.
+The command verifies that the target survives the SIGHUP reload and fails if it
+does not. Units that may receive SIGHUP during early startup should use
+`Restart=always` (or `RestartForceExitStatus=SIGHUP`) so systemd restarts the
+service rather than treating an early reload exit as success.
+
 If you make the tunnel durable, use the template in
 [`packaging/systemd/rustsdcmcp-tunnel.service.example`](../packaging/systemd/rustsdcmcp-tunnel.service.example)
 rather than hand-rolling a unit from the command above. A unit with

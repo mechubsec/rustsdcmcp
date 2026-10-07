@@ -13,6 +13,7 @@ axum-server.workspace = true
 clap.workspace = true
 http.workspace = true
 rand.workspace = true
+rustix.workspace = true
 rmcp.workspace = true
 rustls.workspace = true
 schemars.workspace = true
@@ -34,7 +35,6 @@ mecmcp-transport.workspace = true
 
 [dev-dependencies]
 reqwest.workspace = true
-rustix = { version = "1", features = ["process"] }
 tempfile = "3"
 syn = { version = "3", features = ["full"] }
 quote = "1"

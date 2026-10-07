@@ -12,4 +12,4 @@ pub use server::{
     DeviceGroupListArgs, KNOWN_TOOLS, SCOPED_READ_TOOLS, SdcHandler, WILDCARD_EXCLUDED_TOOLS,
     WRITE_TOOLS,
 };
-pub use signals::install_sighup_handler;
+pub use signals::{SighupHandler, install_early_sighup_handler, install_sighup_handler};
