@@ -40,7 +40,7 @@ cargo_version=$(awk '
     }
 ' Cargo.toml)
 [[ -n $cargo_version ]] || fail 'could not extract version from Cargo.toml [workspace.package]'
-[[ $cargo_version == 0.0.5 ]] || fail "version mismatch: Cargo.toml has $cargo_version, packager expects 0.0.5 (update both)"
+[[ $cargo_version == 0.1.0 ]] || fail "version mismatch: Cargo.toml has $cargo_version, packager expects 0.1.0 (update both)"
 
 # Resolve the effective source commit BEFORE deriving package_root and dist_dir.
 # When packaging a pre-built binary (SDCMCP_PACKAGE_SKIP_BUILD=1), the caller MUST
@@ -89,7 +89,7 @@ payload_commit=$(git rev-parse HEAD)
 git_sha12=${git_commit:0:12}
 source_date_epoch=$(git show -s --format=%ct "$git_commit")
 package_date=$(date -u -d "@$source_date_epoch" +%Y%m%d)
-package_root="rustsdcmcp_0.0.5.${package_date}.${git_sha12}_amd64"
+package_root="rustsdcmcp_0.1.0.${package_date}.${git_sha12}_amd64"
 repo_dist="$repo_root/dist"
 if [[ -e "$repo_dist" || -L "$repo_dist" ]]; then
     [[ -d "$repo_dist" && ! -L "$repo_dist" ]] || fail "artifact root is not a real directory: $repo_dist"
@@ -234,7 +234,7 @@ mecmcp_ref=${mecmcp_refs[0]}
 binary_sha256=$(sha256sum "$stage_dir/bin/rustsdcmcp" | cut -d' ' -f1)
 cat >"$stage_dir/BUILD-INFO" <<EOF
 release_status=release
-version=0.0.5
+version=0.1.0
 git_commit=$git_commit
 payload_commit=$payload_commit
 source_date_epoch=$source_date_epoch
