@@ -339,21 +339,9 @@ published here; each operator supplies their own.
 
 ## Roadmap
 
-`v0.0.1` is the first full release; everything before it was published as a
-prerelease. It ships the Debian archive and a container image, and the shared change-set CLI standard — `--lab-mode`,
-`--state-file`, `--approval-timeout-secs`, and a `--version` that answers — is
-already adopted (#54). What remains:
-
-1. Compose support with secret injection and health checks, on top of the
-   published image.
-2. Remote audit-journal forwarding, so the trail does not stay on the host that
-   produced it.
-3. Broader bounded live validation across the remaining read endpoints, with
-   write workflows exercised only through approved change control.
-4. Wider API coverage. The tool surface is a minority of the SDC API by
-   design — subscriptions are excluded outright, and IAM is excluded except for
-   the read-only, metadata-only `list_users_and_roles` tool (CLAUDE.md,
-   MEC-224) — but several in-scope families are simply unbuilt.
+See [ROADMAP.md](ROADMAP.md) for current coverage, planned expansion, and
+features blocked on upstream API support. Feature requests are welcome as
+GitHub issues.
 
 ## Relationship to `mecmcp`
 
