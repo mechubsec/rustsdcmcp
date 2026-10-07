@@ -511,8 +511,19 @@ credential is refused there. Full evidence in
 [`docs/sdc-api/README.md`](sdc-api/README.md) section 12.
 
 `prepare_sdc_policy_deploy` is not a substitute: it pushes policy and does not
-reconcile the device's own edits. Device sync is not one either — it reconciles
-inventory and leaves `device_config_state` untouched.
+reconcile the device's own edits. Its preview says the same limit the device
+reads do: drift detection relies on SDC's `device_config_state` flag, an absent
+or unrecognized flag does not prove the device matches SDC, and a deploy can
+remove device-local configuration SDC does not model. Device sync is not a
+substitute either — it reconciles inventory and leaves `device_config_state`
+untouched.
+
+`list_sdc_devices` and `get_sdc_device` attach an `oob_drift` advisory.
+`state: "none"` is reserved for a documented in-sync `device_config_state`
+value; the spec names no such token, so a missing field is `not_reported`.
+`device_sync_status: IN_SYNC` does not prove the device matches SDC. Compare
+the device's committed configuration with SDC's policy before treating the
+device as clean.
 
 In the portal, Resolve offers two choices, and the second one edits the device:
 

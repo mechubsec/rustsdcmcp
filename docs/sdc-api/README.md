@@ -791,19 +791,22 @@ Both tools attach an `oob_drift` advisory block to each device:
   "state": "out_of_band_changed",
   "raw_device_config_state": "OUT_OF_BAND_CHANGED",
   "resolution_available_here": false,
+  "advisory": "state \"none\" is reserved for a documented in-sync device_config_state value. ...",
   "resolution_paths": [{"action": "portal", "where": "SDC portal → Devices → Resolve out-of-band changes", ...}],
   "not_a_remedy": ["apply_sdc_device_inventory_sync — inventory only, leaves this state untouched"]
 }
 ```
 
-`state` is `none` when the field is absent, `out_of_band_changed` on an exact
-match, and `unknown` for every other value — including a present-but-non-string
-field, which is treated the same as an unrecognized string rather than as
-absent. `resolution_available_here` is a hardcoded `false`: it does not change
-until this server can reach the portal's endpoints, which is the limit this
-whole section exists to document. The block adds no device configuration to
-the read — only the state string, a length-capped and ASCII-filtered copy of
-the raw value, and the static advisory text above.
+`state` is one of:
+
+| `state` | When |
+|---|---|
+| `not_reported` | `device_config_state` is absent |
+| `out_of_band_changed` | the field is exactly `OUT_OF_BAND_CHANGED` |
+| `none` | the field is a documented in-sync token. The vendored spec names no such token, so this server does not emit `none` |
+| `unknown` | any other present value, including a non-string |
+
+`IN_SYNC` on `device_sync_status` (or on `inventory_sync_info.overall_sync_status`) and an absent `device_config_state` do not prove the device matches SDC. The reliable check is comparing the device's committed configuration with SDC's policy. `resolution_available_here` is a hardcoded `false`: it does not change until this server can reach the portal's endpoints, which is the limit this whole section exists to document. The block adds no device configuration to the read — only the state string, a length-capped and ASCII-filtered copy of the raw value, and the static advisory text above.
 
 ## Still unverified
 

@@ -188,31 +188,46 @@ fn clamp_and_sanitize(s: &str, max_len: usize) -> String {
     result
 }
 
+/// Raw `device_config_state` tokens the vendored SDC spec documents as
+/// in-sync. `Device.device_config_state` is an unconstrained string and
+/// names no in-sync token, so this list is empty and [`apply_oob_drift`]
+/// does not emit `state: "none"`. Add a token here only after the spec
+/// documents it.
+const DOCUMENTED_IN_SYNC_DEVICE_CONFIG_STATE: &[&str] = &[];
+
+/// Static limit carried on every `oob_drift` block. No device data.
+const OOB_DRIFT_ADVISORY: &str = "state \"none\" is reserved for a documented in-sync device_config_state value. The vendored spec names no such token. \"not_reported\" means the field was absent. An absent field does not prove the device matches SDC, and neither does device_sync_status IN_SYNC. Compare the device's committed configuration with SDC's policy.";
+
+fn is_documented_in_sync_device_config_state(raw: &str) -> bool {
+    DOCUMENTED_IN_SYNC_DEVICE_CONFIG_STATE.contains(&raw)
+}
+
 /// Apply oob_drift computation to a device value.
 ///
 /// Computes an advisory oob_drift block based on the device_config_state field:
-/// - absent -> state: "none"
+/// - absent -> state: "not_reported"
+/// - a documented in-sync token -> state: "none" (raw value preserved).
+///   No such token is documented yet, so this state is not emitted.
 /// - `"OUT_OF_BAND_CHANGED"` -> state: "out_of_band_changed" (raw value preserved)
 /// - any other string -> state: "unknown" (raw value preserved)
-/// - present but not a string (unexpected upstream shape) -> state: "unknown"
-///   (no raw value to report)
+/// - present but not a string -> state: "unknown" (no raw value to report)
 ///
-/// The block contains only advisory text; no device configuration.
+/// `"none"` is never the default. The block contains only advisory text; no
+/// device configuration.
 #[must_use]
 pub fn apply_oob_drift(mut value: Value) -> Value {
     use serde_json::Map;
 
     if let Some(obj) = value.as_object_mut() {
-        // Determine the state enum-like value and the sanitized raw value to
-        // report alongside it. Matched against the field's `Value`, not a
-        // `&str` projection: a present-but-non-string field (for example a
-        // stray `null` or number from an upstream API change) must not
-        // collapse into the same "none" the spec reserves for an absent
-        // field — that direction fails open on a drift signal.
+        // Matched against the field's `Value`, not a `&str` projection, so a
+        // present-but-non-string field stays distinct from an absent field.
         let (state, safe_raw) = match obj.get("device_config_state") {
-            None => ("none", None),
+            None => ("not_reported", None),
             Some(Value::String(s)) if s == "OUT_OF_BAND_CHANGED" => {
                 ("out_of_band_changed", Some(clamp_and_sanitize(s, 256)))
+            }
+            Some(Value::String(s)) if is_documented_in_sync_device_config_state(s) => {
+                ("none", Some(clamp_and_sanitize(s, 256)))
             }
             Some(Value::String(s)) => ("unknown", Some(clamp_and_sanitize(s, 256))),
             Some(_) => ("unknown", None),
@@ -227,6 +242,10 @@ pub fn apply_oob_drift(mut value: Value) -> Value {
             safe_raw.map_or(Value::Null, Value::String),
         );
         oob_drift.insert("resolution_available_here".to_string(), Value::Bool(false));
+        oob_drift.insert(
+            "advisory".to_string(),
+            Value::String(OOB_DRIFT_ADVISORY.to_string()),
+        );
 
         // resolution_paths - always the portal action
         let mut portal_path = Map::new();
@@ -679,9 +698,13 @@ mod tests {
                 .expect("state field should be present")
                 .as_str()
                 .expect("state should be a string"),
-            "none"
+            "not_reported"
         );
         assert!(drift.get("raw_device_config_state").unwrap().is_null());
+        assert_eq!(
+            drift.get("advisory").and_then(Value::as_str),
+            Some(OOB_DRIFT_ADVISORY)
+        );
     }
 
     #[test]
@@ -773,11 +796,8 @@ mod tests {
         );
     }
 
-    /// F1 (MEC-1995 review of #216): a present-but-non-string
-    /// `device_config_state` must not read as `"none"` — that's the value
-    /// reserved for the field being absent, and a drift indicator that fails
-    /// open to "no drift" on an unparseable upstream value is the wrong
-    /// direction to be wrong in.
+    /// A present-but-non-string `device_config_state` is `"unknown"`, never
+    /// `"none"`. `"none"` is reserved for a documented in-sync token.
     #[test]
     fn apply_oob_drift_non_string_state_is_unknown_not_none() {
         for raw in [json!(null), json!(7), json!({"x": 1}), json!([1, 2])] {
@@ -793,13 +813,47 @@ mod tests {
         }
     }
 
-    /// F1: absent is still the one case that reads `"none"`.
+    /// Absent field, documented in-sync token, exact drift token, and
+    /// unrecognized value. Only the documented in-sync allowlist may read
+    /// `"none"`.
     #[test]
-    fn apply_oob_drift_absent_state_is_none() {
-        let device = json!({"uuid": "x"});
-        let result = apply_oob_drift(device);
-        let drift = result.get("oob_drift").expect("oob_drift present");
-        assert_eq!(drift.get("state").unwrap().as_str().unwrap(), "none");
+    fn apply_oob_drift_state_matrix() {
+        let absent = apply_oob_drift(json!({"uuid": "x"}));
+        assert_eq!(absent["oob_drift"]["state"], "not_reported");
+        assert!(absent["oob_drift"]["raw_device_config_state"].is_null());
+
+        for raw in DOCUMENTED_IN_SYNC_DEVICE_CONFIG_STATE {
+            let drift = apply_oob_drift(json!({"device_config_state": raw}));
+            assert_eq!(drift["oob_drift"]["state"], "none", "raw {raw}");
+            assert_eq!(drift["oob_drift"]["raw_device_config_state"], *raw);
+        }
+
+        let drifted = apply_oob_drift(json!({"device_config_state": "OUT_OF_BAND_CHANGED"}));
+        assert_eq!(drifted["oob_drift"]["state"], "out_of_band_changed");
+
+        // Lookalikes and garbage are not the reserved in-sync result. The
+        // sibling status token `IN_SYNC` is not a documented value of this
+        // field, and the spec names no in-sync token at all.
+        for raw in [
+            "IN_SYNC",
+            "NONE",
+            "none",
+            "NO_CHANGE",
+            "SYNCHRONIZED",
+            "",
+            "some_other_value",
+        ] {
+            assert!(
+                !is_documented_in_sync_device_config_state(raw),
+                "{raw} must not be treated as documented in-sync"
+            );
+            let drift = apply_oob_drift(json!({"device_config_state": raw}));
+            assert_ne!(
+                drift["oob_drift"]["state"], "none",
+                "raw {raw:?} must not read as none"
+            );
+            assert_eq!(drift["oob_drift"]["state"], "unknown", "raw {raw:?}");
+        }
     }
 
     /// Spoofing check: a pre-existing upstream `oob_drift` key must be
