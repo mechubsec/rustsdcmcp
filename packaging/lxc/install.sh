@@ -89,7 +89,7 @@ validate_layout() {
 validate_build_info() {
     local build_info="$package_dir/BUILD-INFO"
     grep -Fqx 'release_status=release' "$build_info" || die 'BUILD-INFO release status is invalid'
-    grep -Fqx 'version=0.0.5' "$build_info" || die 'BUILD-INFO version is invalid'
+    grep -Fqx 'version=0.1.0' "$build_info" || die 'BUILD-INFO version is invalid'
     grep -Eq '^git_commit=[0-9a-f]{40}$' "$build_info" || die 'BUILD-INFO commit is invalid'
     grep -Eq '^source_date_epoch=[0-9]+$' "$build_info" || die 'BUILD-INFO epoch is invalid'
     grep -Fqx 'target=x86_64-unknown-linux-gnu' "$build_info" || die 'BUILD-INFO target is invalid'

@@ -9,7 +9,7 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
-## Unreleased
+## `v0.1.0` — 2026-10-07
 
 ### Documentation
 - Fixed version/doc drift ahead of v0.1.0 (#183): the README's `mecmcp` pin

@@ -3,7 +3,7 @@
 ## Artifact boundary
 
 Every archive is commit-addressed. It is named
-`rustsdcmcp_0.0.5.YYYYMMDD.<source-commit-12>_amd64.tar.gz` and is paired
+`rustsdcmcp_0.1.0.YYYYMMDD.<source-commit-12>_amd64.tar.gz` and is paired
 with a sibling `.sha256` file under `dist/<full-source-commit>/`. Select the
 approved full source commit explicitly; never glob across `dist/`. The checksum
 contains the archive basename, so verify it from that commit directory:
