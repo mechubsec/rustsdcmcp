@@ -11,6 +11,11 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 
 ## Unreleased
 
+### Added
+
+- Official MCP Registry metadata: `server.json` for the stdio container
+  invocation, and the `io.modelcontextprotocol.server.name` image label.
+
 ### Fixed
 - Device drift advisories no longer treat a missing upstream report as an in-sync result. (#228)
 

@@ -58,6 +58,8 @@ LABEL org.opencontainers.image.title="rustsdcmcp"
 LABEL org.opencontainers.image.description="Security Director Cloud MCP server"
 LABEL org.opencontainers.image.source="https://github.com/mechubsec/rustsdcmcp"
 LABEL org.opencontainers.image.licenses="MIT"
+# Official MCP Registry ownership check: must equal server.json "name".
+LABEL io.modelcontextprotocol.server.name="io.github.mechubsec/rustsdcmcp"
 
 # ENTRYPOINT carries what must always hold: config paths and anything security-
 # relevant. CMD carries only what an operator is expected to replace: bind

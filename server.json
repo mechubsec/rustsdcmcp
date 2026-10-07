@@ -1,0 +1,106 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.mechubsec/rustsdcmcp",
+  "title": "rustsdcmcp",
+  "description": "Juniper Security Director Cloud MCP server: scoped, audited change control. Rust.",
+  "version": "0.1.0",
+  "websiteUrl": "https://mechub.org/projects/rustsdcmcp/",
+  "repository": {
+    "url": "https://github.com/mechubsec/rustsdcmcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/mechubsec/rustsdcmcp:0.1.0",
+      "runtimeHint": "docker",
+      "runtimeArguments": [
+        {
+          "type": "positional",
+          "value": "--rm",
+          "isRequired": true
+        },
+        {
+          "type": "positional",
+          "value": "-i",
+          "isRequired": true
+        },
+        {
+          "type": "named",
+          "name": "--user",
+          "value": "65532:65532",
+          "isRequired": true
+        },
+        {
+          "type": "named",
+          "name": "-v",
+          "value": "{config_file}:/etc/rustsdcmcp/sdc.json:ro",
+          "isRequired": true,
+          "variables": {
+            "config_file": {
+              "description": "Absolute host path to sdc.json. Credential material stays in the environment variable named by that file, not in this manifest.",
+              "format": "filepath",
+              "isRequired": true
+            }
+          }
+        },
+        {
+          "type": "named",
+          "name": "-v",
+          "value": "{state_dir}:/var/lib/sdcmcp",
+          "isRequired": true,
+          "variables": {
+            "state_dir": {
+              "description": "Absolute host directory for change-set state. Must be writable by UID 65532.",
+              "format": "filepath",
+              "isRequired": true
+            }
+          }
+        },
+        {
+          "type": "named",
+          "name": "-v",
+          "value": "{runtime_dir}:/var/lib/rustsdcmcp",
+          "isRequired": true,
+          "variables": {
+            "runtime_dir": {
+              "description": "Absolute host directory for the audit HMAC key file (audit-hmac.key). Must be writable by UID 65532. The image creates the key on first start when the file is absent.",
+              "format": "filepath",
+              "isRequired": true
+            }
+          }
+        },
+        {
+          "type": "named",
+          "name": "-e",
+          "value": "{credential_env}",
+          "isRequired": true,
+          "variables": {
+            "credential_env": {
+              "description": "Environment variable name referenced by sdc.json credential_env. Pass the name only, as in docker -e NAME, so the value is not written into this argument.",
+              "default": "SDC_API_TOKEN",
+              "isRequired": true
+            }
+          }
+        }
+      ],
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--transport",
+          "value": "stdio",
+          "isRequired": true
+        },
+        {
+          "type": "named",
+          "name": "--state-file",
+          "value": "/var/lib/sdcmcp/changeset-state.json",
+          "isRequired": true
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
