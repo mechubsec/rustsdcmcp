@@ -1,9 +1,9 @@
 # rustsdcmcp Roadmap
 
-`rustsdcmcp` currently exposes 73 curated MCP tools: 59 read tools, 14 write
-tools, and a generic object reader. Coverage expansion is driven by customer
-demand and remains intentionally curated rather than mirroring every upstream
-API operation.
+`rustsdcmcp` currently exposes 74 curated MCP tools: 60 read tools (including a
+generic allowlisted object reader) and 14 change-control write tools. Coverage
+expansion is driven by customer demand and remains intentionally curated rather
+than mirroring every upstream API operation.
 
 ## Coverage expansion
 
@@ -17,9 +17,11 @@ The next areas, in expected demand order, are:
 6. Template writes.
 7. Read-only MCP resources and prompts.
 
-Write tools are registered only when the operator opts in. Every mutation
-continues to use the prepare → independent approval → apply change-set
-workflow. A benchmark harness is required before making performance claims.
+Write tools are reachable only through a bearer token whose scope names each
+one explicitly; a wildcard scope grants none, and unauthenticated callers
+cannot invoke them. Every mutation continues to use the prepare → independent
+approval → apply change-set workflow. A benchmark harness is required before
+making performance claims.
 
 ## Blocked upstream
 
