@@ -260,9 +260,9 @@ surface was removed to justify it.
 ## `v0.1.0-lab.10` — 2026-08-25
 
 Measured against the preceding **`v0.1.0-lab.9`** tag, not against intermediate
-untagged commits. The **Unreleased** block below is byte-identical to lab.9 and
-therefore describes surface that tag already carried — it does not cover
-anything in this release.
+untagged commits. The **`v0.1.0-lab.9`** block below is byte-identical to that
+tag's own `Unreleased` section and therefore describes surface that tag
+already carried — it does not cover anything in this release.
 
 ### Added — action required for existing tokens
 
@@ -332,7 +332,7 @@ anything in this release.
 - Recorded what this server is not for (#34), and why the distroless image has
   no `HEALTHCHECK`.
 
-## Unreleased
+## `v0.1.0-lab.9` — 2026-08-19
 
 ### Added
 
