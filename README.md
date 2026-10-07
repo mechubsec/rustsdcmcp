@@ -54,14 +54,24 @@ template endpoints were exercised live. Device sync **imports** into SDC rather
 than pushing to the device, but reconciles inventory only and does not clear
 `device_config_state: OUT_OF_BAND_CHANGED`.
 
-Read-path security properties were verified live on 2026-08-07 against commit
-`ea81805d2b4b97df9bdd3f70423e047524896a3d` with `mecmcp` `v0.5.0`, and have not
-been re-run end to end since: credential-based startup tenant validation, a
-scoped grant exposing exactly its permitted tools and no write tools, `401` for
-missing and invalid bearers, and audit records carrying HMAC-redacted targets
-with no cleartext tenant identifier. Treat these as results for that build. The
+Read-path security properties were last verified live on 2026-08-07 against
+commit `ea81805d2b4b97df9bdd3f70423e047524896a3d` with `mecmcp` `v0.5.0`. The
 transport and scope preflight were replaced afterwards in `e28d0cc` and
-`369f9bb`, so current `main` has not had the same audit.
+`369f9bb`, so that result no longer speaks for current `main`; no lab SDC
+tenant was available to repeat it live. On 2026-10-06, against commit
+`2036523` with `mecmcp` `v0.26.0`, the automated integration suite was re-run
+instead — `cargo test --workspace`, 258 passed, 0 failed — which covers:
+requests with a missing bearer are refused
+(`crates/rustsdcmcp/tests/http_boundary.rs::router_requires_bearer`),
+out-of-scope tenants are refused
+(`crates/rustsdcmcp/tests/http_boundary.rs::out_of_scope_tenant_is_refused`),
+exact tool and tenant scope enforcement with read/write tool disjointness
+(`crates/rustsdcmcp/src/server.rs` scope unit tests,
+`crates/rustsdcmcp/tests/tool_contract.rs`), and secret-key redaction of
+responses (`crates/rustsdcmcp-core/src/redact.rs` unit tests). The remaining
+properties from the 2026-08-07 live audit have not been re-verified on
+current `main`; this run is not a substitute for the live-tenant exercise and
+does not re-establish one.
 
 Observed response shapes and the remaining endpoint questions are tracked in
 [`docs/sdc-api/README.md`](docs/sdc-api/README.md#still-unverified).
@@ -337,9 +347,9 @@ GitHub issues.
 
 [`mecmcp`](https://github.com/mechubsec/mecmcp) is the vendor-neutral Rust
 foundation shared by the mechub MCP server family. This repository consumes it,
-rather than forking it. `v0.0.1` pins all six shared crates — `mecmcp-audit`,
-`mecmcp-auth`, `mecmcp-changeset`, `mecmcp-runtime`, `mecmcp-server`, and
-`mecmcp-transport` — to `v0.24.0`.
+rather than forking it. `main` pins all eight shared crates — `mecmcp-audit`,
+`mecmcp-auth`, `mecmcp-changeset`, `mecmcp-redact`, `mecmcp-runtime`,
+`mecmcp-secret`, `mecmcp-server`, and `mecmcp-transport` — to `v0.26.0`.
 
 **The compatibility blocker is cleared.** Earlier revisions of this section
 said a release was blocked until 59 temporary compatibility declarations were
@@ -379,11 +389,15 @@ JSON is mandatory. The `text` format is for reading in a terminal and is not a
 parse target. The file is the operator-facing artifact and must be rotated — the
 server never truncates it.
 
-### Transport (specified, not yet implemented)
+### Transport
 
 Records are written directly into SSDF's `ssdf.audit` as **hash-chained** rows,
 per SSDF's merged evidence contract, so that deleting or editing a row is
-detectable. Tracked in [mecmcp#292](https://github.com/mechubsec/mecmcp/issues/292).
+detectable. This is implemented: the server wires an
+`EvidenceService`/`EvidenceHttpTransport` pair at startup when evidence
+forwarding is configured (`crates/rustsdcmcp/src/main.rs`), landed as the
+SSDF evidence pipeline in
+[mecmcp#292](https://github.com/mechubsec/mecmcp/issues/292).
 
 A cheaper syslog path was designed and rejected: it works, but the records are
 unchained, and every other link here is tamper-evident by construction — plan

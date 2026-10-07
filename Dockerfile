@@ -57,7 +57,7 @@ COPY --from=builder /build/target/release/rustsdcmcp /usr/local/bin/rustsdcmcp
 LABEL org.opencontainers.image.title="rustsdcmcp"
 LABEL org.opencontainers.image.description="Security Director Cloud MCP server"
 LABEL org.opencontainers.image.source="https://github.com/mechubsec/rustsdcmcp"
-LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
+LABEL org.opencontainers.image.licenses="MIT"
 
 # ENTRYPOINT carries what must always hold: config paths and anything security-
 # relevant. CMD carries only what an operator is expected to replace: bind

@@ -13,6 +13,6 @@
   "poll_initial_ms": 250,
   "poll_max_ms": 3000,
   "poll_deadline_ms": 120000,
-  "changeset_state_file": "/var/lib/sdcmcp/changeset-state.json",
+  "changeset_state_file": "/var/lib/rustsdcmcp/changeset-state.json",
   "approval_ttl_secs": 3600
 }
