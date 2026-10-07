@@ -287,6 +287,24 @@ fn resolve_auth_mode(
     }
 }
 
+/// Decide the listener's authentication boundary for the selected transport.
+///
+/// Stdio has no HTTP boundary, so `--tokens-file` is never consulted there —
+/// a container `ENTRYPOINT` that bakes in a fixed `--tokens-file` path must
+/// not block a stdio start when nothing is mounted at that path (MEC-2121).
+/// Extracted from `run` so this transport split is unit-testable without a
+/// live SDC endpoint, which `run` requires for the tenant-scope check.
+fn resolve_listener_auth_mode(
+    transport: Transport,
+    tokens_file: Option<&Path>,
+    allow_no_auth: bool,
+) -> Result<Option<AuthMode>, &'static str> {
+    match transport {
+        Transport::Stdio => Ok(None),
+        Transport::StreamableHttp => resolve_auth_mode(tokens_file, allow_no_auth).map(Some),
+    }
+}
+
 /// Cancel `shutdown` on the first SIGTERM or SIGINT.
 ///
 /// `mecmcp_runtime::shutdown::GracefulShutdown` now handles both SIGINT and
@@ -639,14 +657,12 @@ async fn main() -> Result<()> {
     // CLI refusals, before anything reads a credential or contacts SDC. Only
     // loading the selected store is deferred, so an unusable flag combination
     // is reported as itself rather than as a downstream credential error.
-    let auth_mode = match args.transport {
-        // Stdio has no HTTP boundary, so a token store would never be consulted.
-        Transport::Stdio => None,
-        Transport::StreamableHttp => Some(
-            resolve_auth_mode(args.tokens_file.as_deref(), args.allow_no_auth)
-                .map_err(|error| anyhow::anyhow!("{error}"))?,
-        ),
-    };
+    let auth_mode = resolve_listener_auth_mode(
+        args.transport,
+        args.tokens_file.as_deref(),
+        args.allow_no_auth,
+    )
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
 
     if let Some(key_path) = args.audit_hmac_key_file.as_deref() {
         ensure_audit_hmac_key(key_path).context("pre-provisioning audit HMAC key file")?;
@@ -965,8 +981,50 @@ async fn main() -> Result<()> {
 mod tests {
     use super::{
         AuthMode, DEFAULT_APPROVAL_TIMEOUT_SECS, ParsedCli, ServerCli, resolve, resolve_auth_mode,
+        resolve_listener_auth_mode,
     };
+    use mecmcp_runtime::cli::Transport;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn stdio_never_consults_the_tokens_file() {
+        // A container `ENTRYPOINT` bakes in a fixed `--tokens-file` path, so
+        // this must stay `Ok(None)` even when that path does not exist --
+        // the missing-file case an image's stdio start hits in practice.
+        assert_eq!(
+            resolve_listener_auth_mode(
+                Transport::Stdio,
+                Some(Path::new("/does/not/exist/tokens.json")),
+                false,
+            ),
+            Ok(None),
+        );
+        assert_eq!(
+            resolve_listener_auth_mode(Transport::Stdio, None, false),
+            Ok(None),
+            "stdio must not require --tokens-file or --allow-no-auth either"
+        );
+    }
+
+    #[test]
+    fn streamable_http_still_requires_an_auth_decision() {
+        assert_eq!(
+            resolve_listener_auth_mode(Transport::StreamableHttp, None, false),
+            Err(
+                "--transport streamable-http requires --tokens-file (or --allow-no-auth on loopback)"
+            ),
+        );
+        assert_eq!(
+            resolve_listener_auth_mode(
+                Transport::StreamableHttp,
+                Some(Path::new("/etc/rustsdcmcp/tokens.json")),
+                false,
+            ),
+            Ok(Some(AuthMode::Tokens(PathBuf::from(
+                "/etc/rustsdcmcp/tokens.json"
+            )))),
+        );
+    }
 
     #[test]
     fn a_tokens_file_alone_selects_an_authenticated_listener() {
