@@ -16,7 +16,10 @@ jobs:
       # caller, never widened, so this job must grant them itself -- see
       # mecmcp's docs/RELEASE-WORKFLOWS.md.
       id-token: write
-    uses: mechubsec/mecmcp/.github/workflows/reusable-release-image.yml@b529190df5b2f1caa0fe1dd16ef29dbc74c3c51e # v0.26.1
+    # Pinned past v0.26.1 to pick up #501 (max-mode provenance + SBOM
+    # attestation on the pushed image); no mecmcp release past v0.26.1
+    # exists yet, so this is an unreleased main commit, not a tag.
+    uses: mechubsec/mecmcp/.github/workflows/reusable-release-image.yml@42989f693f5b73cf0a951d74881cdd22b02d6785 # main, post-v0.26.1 (#501)
     with:
       # GHCR requires a lowercase image path; github.repository is already lowercase.
       image: ghcr.io/${{ github.repository }}
