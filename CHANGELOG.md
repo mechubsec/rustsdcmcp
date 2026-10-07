@@ -11,6 +11,18 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 
 ## Unreleased
 
+### Documentation
+- Fixed version/doc drift ahead of v0.1.0 (#183): the README's `mecmcp` pin
+  reference was stale (said six crates at an old tag; current `main` pins
+  eight crates at `v0.26.0`), the SSDF hash-chained audit transport was
+  still described as "specified, not yet implemented" although it shipped
+  and is wired into `--ssdf-audit-endpoint`, and the container image's
+  `org.opencontainers.image.licenses` label said `MIT OR Apache-2.0` against
+  Cargo's `MIT`. The example config's `changeset_state_file` path was
+  corrected so `--validate-package` passes against it. The read-path
+  security test suite was re-run against current `main` and the README
+  records the 2026-10-06 result.
+
 ### Changed
 - **Every list tool with no upstream SDC pagination is now byte-budget
   paginated, not just `list_sdc_config_versions` (#172).** Each tool's
