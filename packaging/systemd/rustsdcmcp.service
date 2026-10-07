@@ -21,7 +21,8 @@ ExecStart=/usr/local/bin/rustsdcmcp \
     --audit-redact devices=hmac \
     --audit-hmac-key-file /etc/rustsdcmcp/audit-hmac.key
 ExecReload=/bin/kill -HUP $MAINPID
-Restart=on-failure
+# SIGHUP is the token/audit reload path; restart if it arrives during startup.
+Restart=always
 RestartSec=5s
 TimeoutStopSec=30s
 KillSignal=SIGTERM

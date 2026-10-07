@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use mecmcp_auth::{NoGrant, TokenStoreFile};
 use mecmcp_runtime::cli::{Cli, Command, ParsedCli, Transport};
 use rmcp::ServiceExt as _;
-use rustsdcmcp::{KNOWN_TOOLS, SdcHandler, serve_http};
+use rustsdcmcp::{KNOWN_TOOLS, SdcHandler, SighupHandler, serve_http};
 use rustsdcmcp_core::{ChangeManager, SdcClient, SdcConfig};
 use std::{
     fs,
@@ -322,6 +322,25 @@ fn install_shutdown_signals(shutdown: CancellationToken) -> Result<()> {
     Ok(())
 }
 
+/// Confirm that a server targeted by `token set-scopes` survived the reload.
+///
+/// The shared token command can report a successful write as soon as SIGHUP is
+/// delivered. A short liveness probe turns a server that exited on that signal
+/// into a failed command instead of false success.
+#[cfg(unix)]
+fn verify_server_alive(raw_pid: i32) -> Result<()> {
+    let pid = rustix::process::Pid::from_raw(raw_pid)
+        .ok_or_else(|| anyhow::anyhow!("server PID must be positive"))?;
+    rustix::process::test_kill_process(pid).map_err(|error| {
+        anyhow::anyhow!("server process {raw_pid} is not alive after SIGHUP: {error}")
+    })
+}
+
+#[cfg(not(unix))]
+fn verify_server_alive(_raw_pid: i32) -> Result<()> {
+    anyhow::bail!("--server-pid liveness checks are available only on Unix")
+}
+
 /// Validate package configuration file.
 ///
 /// Checks that config/sdc.json.example:
@@ -617,6 +636,8 @@ fn validate_package(package_dir: &Path) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let sighup_handler: SighupHandler =
+        rustsdcmcp::install_early_sighup_handler().context("installing early SIGHUP handler")?;
     // `parse_for`/`parse_with_provenance` name the binary and its version, so
     // `--version` answers instead of failing as an unknown argument. Parsing
     // the shared `Cli` directly leaves it with no version of its own
@@ -698,9 +719,20 @@ async fn main() -> Result<()> {
     let config = SdcConfig::from_path(&args.device_mapping)
         .with_context(|| format!("loading {}", args.device_mapping.display()))?;
 
+    let set_scopes_pid = match args.command.as_ref() {
+        Some(Command::Token {
+            action: mecmcp_runtime::cli::TokenAction::SetScopes { server_pid, .. },
+        }) => *server_pid,
+        _ => None,
+    };
     if let Some(Command::Token { action }) = args.command {
-        return mecmcp_runtime::token_cmd::run(action, &[config.tenant], KNOWN_TOOLS)
-            .map_err(anyhow::Error::from);
+        mecmcp_runtime::token_cmd::run(action, &[config.tenant], KNOWN_TOOLS)
+            .map_err(anyhow::Error::from)?;
+        if let Some(pid) = set_scopes_pid {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            verify_server_alive(pid)?;
+        }
+        return Ok(());
     }
 
     // Explicit CLI beats product configuration, but only when actually typed.
@@ -883,8 +915,9 @@ async fn main() -> Result<()> {
     // `--tokens-file`) still needs a handler, or SIGHUP's default
     // disposition (terminate) kills the process on the very signal logrotate
     // sends it.
-    rustsdcmcp::install_sighup_handler(audit_sink, token_store.clone())
-        .context("installing SIGHUP handler")?;
+    sighup_handler
+        .configure(audit_sink, token_store.clone())
+        .context("configuring SIGHUP handler")?;
 
     // Bound rather than propagated with `?`, so the flush below runs whichever
     // way serving ended. `EvidenceService::Drop` deliberately does not spool --
@@ -1528,5 +1561,17 @@ mod otel_endpoint_tests {
     #[test]
     fn no_otel_endpoint_starts_normally() {
         reject_unsupported_otel_endpoint(None).expect("no --otel-endpoint must not be refused");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod server_pid_tests {
+    use super::verify_server_alive;
+
+    #[test]
+    fn dead_server_pid_is_an_error() {
+        let error = verify_server_alive(2_000_000)
+            .expect_err("a PID outside the host range must not report success");
+        assert!(error.to_string().contains("not alive"), "{error}");
     }
 }
