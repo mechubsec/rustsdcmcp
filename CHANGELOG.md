@@ -11,6 +11,19 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 
 ## Unreleased
 
+### Documentation
+- Fixed version/doc drift ahead of v0.1.0 (#183): the README's `mecmcp`
+  pin reference was stale at `v0.24.0`/six crates (actual: `v0.26.0`, eight
+  crates); the SSDF hash-chained audit transport was still described as
+  "specified, not yet implemented" although it shipped and is wired into
+  `--ssdf-audit-endpoint`; the container image's
+  `org.opencontainers.image.licenses` label said `MIT OR Apache-2.0` against
+  Cargo's `MIT`; a stray `## Unreleased` heading in this file, left over from
+  an untagged release, is renamed to `v0.1.0-lab.9`. The read-path security
+  test suite was re-run against current `main` and the README records the
+  2026-10-06 result. `--validate-package` was confirmed to already pass
+  against the packaged example config.
+
 ### Changed
 - **Every list tool with no upstream SDC pagination is now byte-budget
   paginated, not just `list_sdc_config_versions` (#172).** Each tool's
@@ -332,7 +345,7 @@ anything in this release.
 - Recorded what this server is not for (#34), and why the distroless image has
   no `HEALTHCHECK`.
 
-## Unreleased
+## `v0.1.0-lab.9` — 2026-08-19
 
 ### Added
 

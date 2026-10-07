@@ -55,13 +55,24 @@ than pushing to the device, but reconciles inventory only and does not clear
 `device_config_state: OUT_OF_BAND_CHANGED`.
 
 Read-path security properties were verified live on 2026-08-07 against commit
-`ea81805d2b4b97df9bdd3f70423e047524896a3d` with `mecmcp` `v0.5.0`, and have not
-been re-run end to end since: credential-based startup tenant validation, a
-scoped grant exposing exactly its permitted tools and no write tools, `401` for
-missing and invalid bearers, and audit records carrying HMAC-redacted targets
-with no cleartext tenant identifier. Treat these as results for that build. The
-transport and scope preflight were replaced afterwards in `e28d0cc` and
-`369f9bb`, so current `main` has not had the same audit.
+`ea81805d2b4b97df9bdd3f70423e047524896a3d` with `mecmcp` `v0.5.0`: credential-
+based startup tenant validation, a scoped grant exposing exactly its permitted
+tools and no write tools, `401` for missing and invalid bearers, and audit
+records carrying HMAC-redacted targets with no cleartext tenant identifier.
+Treat those as results for that build; they predate the transport and scope
+preflight rewrite in `e28d0cc` and `369f9bb`.
+
+**Re-run on 2026-10-06 against current `main`** (`mecmcp` `v0.26.0`): the full
+automated test suite, 175 tests, passed —
+`cargo test --release --workspace`. It exercises the same properties through
+the current transport and scope code, not the pre-rewrite one: bearer-auth and
+tenant-scope refusal (`router_requires_bearer`, `out_of_scope_tenant_is_refused`
+in `crates/rustsdcmcp/tests/http_boundary.rs`), HMAC redaction of audit targets
+(the `redact` module's unit tests), and the SSDF evidence pipeline, SBOM/
+packaging, and stdio-discovery regressions added since. This is an automated
+regression re-run, not a new live call against a production SDC tenant — no
+SDC lab credential is available to this task, so the 2026-08-07 live result
+above remains the most recent live-SDC verification.
 
 Observed response shapes and the remaining endpoint questions are tracked in
 [`docs/sdc-api/README.md`](docs/sdc-api/README.md#still-unverified).
@@ -349,9 +360,9 @@ already adopted (#54). What remains:
 
 [`mecmcp`](https://github.com/mechubsec/mecmcp) is the vendor-neutral Rust
 foundation shared by the mechub MCP server family. This repository consumes it,
-rather than forking it. `v0.0.1` pins all six shared crates — `mecmcp-audit`,
-`mecmcp-auth`, `mecmcp-changeset`, `mecmcp-runtime`, `mecmcp-server`, and
-`mecmcp-transport` — to `v0.24.0`.
+rather than forking it. It pins all eight shared crates — `mecmcp-audit`,
+`mecmcp-auth`, `mecmcp-changeset`, `mecmcp-redact`, `mecmcp-runtime`,
+`mecmcp-secret`, `mecmcp-server`, and `mecmcp-transport` — to `v0.26.0`.
 
 **The compatibility blocker is cleared.** Earlier revisions of this section
 said a release was blocked until 59 temporary compatibility declarations were
@@ -391,11 +402,13 @@ JSON is mandatory. The `text` format is for reading in a terminal and is not a
 parse target. The file is the operator-facing artifact and must be rotated — the
 server never truncates it.
 
-### Transport (specified, not yet implemented)
+### Transport (implemented)
 
 Records are written directly into SSDF's `ssdf.audit` as **hash-chained** rows,
 per SSDF's merged evidence contract, so that deleting or editing a row is
-detectable. Tracked in [mecmcp#292](https://github.com/mechubsec/mecmcp/issues/292).
+detectable. Shipped in [mecmcp#292](https://github.com/mechubsec/mecmcp/issues/292)
+(`mecmcp-audit`'s `sinks::ssdf::SsdfSink`) and wired into this server's
+`--ssdf-audit-endpoint` flag and its siblings; set it to enable the pipeline.
 
 A cheaper syslog path was designed and rejected: it works, but the records are
 unchained, and every other link here is tamper-evident by construction — plan
