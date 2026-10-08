@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Regression test: the installer must refuse to operate on tokens.json or
+# Guard test: the installer must refuse to operate on tokens.json or
 # audit-hmac.key when the existing path is not a regular file, and must
-# leave whatever that path points to untouched.
+# leave whatever that path points to untouched. This covers two distinct
+# checks in the installer: the layout check that runs before any mutation,
+# and the narrower check immediately preceding each chmod/chown, which is
+# exercised here by swapping the path out from under the installer mid-run.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -89,7 +92,9 @@ if [[ ! -f "$CONFIG_DIR/audit-hmac.key" ]]; then
     exit 1
 fi
 
-# --- tokens.json: replace the real file with a path pointing at the canary. ---
+# --- tokens.json: replace the real file with a path pointing at the canary
+# before a second run even starts. The installer's layout check, which runs
+# before any mutation, must catch this. ---
 rm -f "$STATE_DIR/tokens.json"
 ln -s "$CANARY" "$STATE_DIR/tokens.json"
 canary_before="$(stat -c '%a' "$CANARY")"
@@ -100,10 +105,10 @@ if ./packaging/lxc/install.sh >/dev/null 2>"$STAGING/tokens-refusal.log"; then
 fi
 grep -q "unsafe destination file" "$STAGING/tokens-refusal.log" \
     || { echo "FAIL: unexpected refusal message for tokens.json" >&2; cat "$STAGING/tokens-refusal.log" >&2; exit 1; }
-assert_refused_and_canary_untouched "tokens.json" "$canary_before"
+assert_refused_and_canary_untouched "tokens.json layout check" "$canary_before"
 rm -f "$STATE_DIR/tokens.json"
 
-# --- audit-hmac.key: replace the real file left by the baseline install. ---
+# --- audit-hmac.key: same check, same path. ---
 rm -f "$CONFIG_DIR/audit-hmac.key"
 ln -s "$CANARY" "$CONFIG_DIR/audit-hmac.key"
 canary_before="$(stat -c '%a' "$CANARY")"
@@ -114,6 +119,40 @@ if ./packaging/lxc/install.sh >/dev/null 2>"$STAGING/audit-key-refusal.log"; the
 fi
 grep -q "unsafe destination file" "$STAGING/audit-key-refusal.log" \
     || { echo "FAIL: unexpected refusal message for audit-hmac.key" >&2; cat "$STAGING/audit-key-refusal.log" >&2; exit 1; }
-assert_refused_and_canary_untouched "audit-hmac.key" "$canary_before"
+assert_refused_and_canary_untouched "audit-hmac.key layout check" "$canary_before"
+rm -f "$CONFIG_DIR/audit-hmac.key"
 
-echo "PASS: installer refuses an unsafe tokens.json and audit-hmac.key path"
+# --- Re-establish a clean baseline for the mid-run swap below. ---
+./packaging/lxc/install.sh >/dev/null
+[[ -f "$STATE_DIR/tokens.json" ]] || { echo "FAIL: could not re-establish baseline tokens.json" >&2; exit 1; }
+
+# --- tokens.json: swap the existing, already-validated file out from under
+# the installer mid-run, after the layout check has already passed on it but
+# before the installer reaches it again to fix its mode. A shim ahead of the
+# real `install` on PATH performs the swap at the point in the run where the
+# installer is between those two checks. ---
+SHIM_DIR="$STAGING/shim"
+install -d "$SHIM_DIR"
+cat >"$SHIM_DIR/install" <<SHIM
+#!/usr/bin/env bash
+set -euo pipefail
+/usr/bin/install "\$@"
+case "\$*" in
+    *rustsdcmcp.tmpfiles*)
+        rm -f "$STATE_DIR/tokens.json"
+        ln -s "$CANARY" "$STATE_DIR/tokens.json"
+        ;;
+esac
+SHIM
+chmod +x "$SHIM_DIR/install"
+
+canary_before="$(stat -c '%a' "$CANARY")"
+if PATH="$SHIM_DIR:$PATH" ./packaging/lxc/install.sh >/dev/null 2>"$STAGING/tokens-midrun-refusal.log"; then
+    echo "FAIL: installer did not refuse a tokens.json swapped in mid-run" >&2
+    exit 1
+fi
+grep -q "unsafe destination file" "$STAGING/tokens-midrun-refusal.log" \
+    || { echo "FAIL: unexpected refusal message for mid-run tokens.json swap" >&2; cat "$STAGING/tokens-midrun-refusal.log" >&2; exit 1; }
+assert_refused_and_canary_untouched "tokens.json mid-run swap" "$canary_before"
+
+echo "PASS: installer refuses an unsafe tokens.json and audit-hmac.key path, including a swap mid-run"

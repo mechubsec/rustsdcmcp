@@ -226,19 +226,19 @@ assert_installer_post_jq_validation_order() {
 }
 assert_installer_post_jq_validation_order
 
-# tokens.json and audit-hmac.key live in a directory the service account can
-# write to. Guard against a non-regular path reappearing there between the
-# layout check and the point of use: every chmod/chown of either path must be
-# immediately preceded (ignoring blank lines) by its own freshly re-run
-# reject_unsafe_file call, and neither path may be created via a direct
-# redirect -- only via mktemp + install(1).
+# Guard against the destination changing between the layout check and the
+# point of use: every chmod/chown of either managed path must be immediately
+# preceded (ignoring blank lines) by its own freshly re-run reject_unsafe_file
+# call, and neither path may be created via a direct redirect -- only via
+# mktemp + install(1).
 # shellcheck disable=SC2016  # these are literal source fragments, not expansions
 assert_installer_reguards_before_mutation() {
     local -a guard_pairs=(
         'reject_unsafe_file "$hmac_path"|chmod 0600 "$hmac_path"'
         'reject_unsafe_file "$tokens_path"|chmod 0600 "$tokens_path"'
         'reject_unsafe_file "$hmac_path"|chown rustsdcmcp:rustsdcmcp "$hmac_path"'
-        'reject_unsafe_file "$tokens_path"|chown rustsdcmcp:rustsdcmcp "$tokens_path"'
+        'reject_unsafe_file "$tokens_path"|chown -h rustsdcmcp:rustsdcmcp "$tokens_path"'
+        'reject_unsafe_file "$tokens_path"|runuser -u rustsdcmcp -- chmod 0600 "$tokens_path"'
     )
     local pair guard mutation mutation_line prev_line prev_text
     local -a mutation_lines=()
@@ -266,6 +266,9 @@ assert_installer_reguards_before_mutation() {
     fi
     require_contains 'install -m 0600 "$tokens_tmp" "$tokens_path"' "$installer"
     require_contains 'install -m 0600 "$hmac_tmp" "$hmac_path"' "$installer"
+    if grep -Fq 'chown rustsdcmcp:rustsdcmcp "$tokens_path"' "$installer"; then
+        fail 'tokens.json chown must use chown -h, not a plain follow-symlink chown'
+    fi
 }
 assert_installer_reguards_before_mutation
 
