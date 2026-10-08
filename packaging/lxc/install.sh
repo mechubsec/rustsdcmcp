@@ -293,6 +293,12 @@ fi
 #
 # The file is never copied automatically — that would leave a duplicate secret
 # behind, which is what the stale-secret scan exists to flag.
+#
+# Re-validate immediately before use: the earlier managed_destinations check
+# ran before apt/sysusers/tmpfiles, leaving a window during which this
+# service-writable path could change underneath it.
+reject_unsafe_file "$tokens_path"
+reject_unsafe_file "$hmac_path"
 if [[ ! -e "$tokens_path" ]]; then
     if [[ -e "$legacy_tokens_path" ]]; then
         printf '%s\n' ">> Not creating $tokens_path: a token store already exists at"
@@ -309,22 +315,32 @@ if [[ ! -e "$tokens_path" ]]; then
         printf '%s\n' ">>   <restart the unit if it was running, then confirm its state>"
         printf '%s\n' ">>   shred -u $legacy_tokens_path   # secure erase, not rm"
     else
-        printf '%s\n' '{"version":1,"tokens":[]}' >"$tokens_path"
+        tokens_tmp=$(mktemp)
+        printf '%s\n' '{"version":1,"tokens":[]}' >"$tokens_tmp"
+        install -m 0600 "$tokens_tmp" "$tokens_path"
+        rm -f "$tokens_tmp"
     fi
 fi
 if [[ ! -e "$hmac_path" ]]; then
-    umask 077
-    head -c 32 /dev/urandom >"$hmac_path"
+    hmac_tmp=$(mktemp)
+    (umask 077 && head -c 32 /dev/urandom >"$hmac_tmp")
+    install -m 0600 "$hmac_tmp" "$hmac_path"
+    rm -f "$hmac_tmp"
 fi
-# Apply 0600 only to files that exist. tokens_path may be absent when a legacy
-# store exists, in which case the runtime serves the legacy file and warns.
+# Apply ownership/mode only to files that exist. tokens_path may be absent
+# when a legacy store exists, in which case the runtime serves the legacy
+# file and warns. Re-validate immediately before each chmod/chown.
+reject_unsafe_file "$hmac_path"
 chmod 0600 "$hmac_path"
 if [[ -e "$tokens_path" ]]; then
+    reject_unsafe_file "$tokens_path"
     chmod 0600 "$tokens_path"
 fi
 if (( live_install )); then
+    reject_unsafe_file "$hmac_path"
     chown rustsdcmcp:rustsdcmcp "$hmac_path"
     if [[ -e "$tokens_path" ]]; then
+        reject_unsafe_file "$tokens_path"
         chown rustsdcmcp:rustsdcmcp "$tokens_path"
     fi
 fi
