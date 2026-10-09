@@ -52,3 +52,20 @@ paths = [
   '''(^|/)crates/rustsdcmcp-core/src/redact\.rs$''',
 ]
 targetRules = ["junos-type9-secret"]
+
+# redact.rs's config_diff_cli_text_pem_block_is_redacted test (MEC-2519,
+# rustsdcmcp#241) asserted a PEM-formatted private key embedded in a
+# config_diff survives header/footer but has its body redacted. The fixture's
+# key body is a repeated "AAAA" literal, not real key material; a same-line
+# `gitleaks:allow` comment on the test didn't suppress this because the match
+# spans multiple lines below the comment. The fixture was later rewritten
+# (a9a43c9) to avoid a literal PEM marker at HEAD, but this commit still
+# appears in --full-history scans of branches that pass through it.
+[[allowlists]]
+description = "Synthetic PEM literal in redact.rs config_diff PEM-block test (MEC-2519), not a real key"
+condition = "AND"
+commits = ["df90d431fe144a1a377ab948a10ea5c8898ce426"]
+paths = [
+  '''(^|/)crates/rustsdcmcp-core/src/redact\.rs$''',
+]
+targetRules = ["private-key"]
