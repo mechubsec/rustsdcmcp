@@ -115,7 +115,7 @@ fn normalize_key(key: &str) -> String {
 /// one existed.
 ///
 /// `config_diff` fields are pulled out before the generic scan runs and
-/// spliced back in afterward, redacted by [`redact_config_diff`] instead —
+/// spliced back in afterward, redacted by `redact_config_diff` instead —
 /// see that function's doc comment for why.
 #[must_use]
 pub fn redact_secrets(mut value: Value) -> Value {
