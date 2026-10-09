@@ -168,61 +168,152 @@ fn redact_config_diff(raw: &str) -> String {
 /// [`mecmcp_redact::junos::redact_log_artefact`] uses elsewhere in the
 /// shared crate.
 ///
-/// The floor cannot simply run unconditionally over every line first,
-/// because its line-oriented scan is not safe over the specific statement
-/// shapes the Junos vocabulary pass exists to protect (see
-/// [`redact_config_diff`]'s doc comment for why `config_diff` is handled
-/// outside the generic scan at all). So this splits the input into
-/// contiguous runs on the boundary of those statements: a run that does not
-/// contain one of them goes through the floor and then the vocabulary pass;
-/// a line that is one of them goes through the vocabulary pass alone.
+/// The floor's own denylist substring-matches `session` (MEC-537), so it
+/// cannot simply run over a Junos session-logging statement like
+/// `session-init`/`session-close`/`limit-session`/`session-timeout`: its
+/// line-oriented scan would treat the keyword as a denylisted key and
+/// redact the rest of that line, which on SDC's single-line CLI rendering
+/// (see [`redact_config_diff`]'s doc comment) is the entire body. A prior
+/// version of this function routed a whole line containing `session` around
+/// the floor instead, which let a *real* secret on that same line — a
+/// passphrase, an API token, a URL credential — through unredacted
+/// (Percy MEC-2594 F1).
 ///
-/// Splitting into runs (rather than every line standalone) keeps the
-/// floor's own cross-line state — an open PEM block, a YAML block scalar —
-/// intact for any run that does not cross one of those statement
-/// boundaries.
+/// So instead of skipping the floor, this masks only the closed
+/// [`SESSION_TOKENS`] vocabulary with an inert placeholder before the floor
+/// runs over the *whole*, unsplit body, then swaps the placeholders back —
+/// everything else on a session-statement line, including a real secret,
+/// still goes through the floor.
 fn redact_cli_text(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut run = String::new();
-    for line in raw.split_inclusive('\n') {
-        if is_session_line(line) {
-            if !run.is_empty() {
-                out.push_str(&floor_then_junos(&run));
-                run.clear();
-            }
-            out.push_str(&mecmcp_redact::junos::redact_log_text(line));
-        } else {
-            run.push_str(line);
-        }
-    }
-    if !run.is_empty() {
-        out.push_str(&floor_then_junos(&run));
-    }
-    out
+    let (masked, originals) = mask_session_tokens(raw);
+    let redacted = floor_then_junos(&masked);
+    unmask_session_tokens(&redacted, &originals)
 }
 
-/// The generic denylist/shape floor, then the Junos vocabulary pass on top —
-/// see [`redact_cli_text`] for why both run over a run of lines that does not
-/// cross a statement boundary [`is_session_line`] identifies.
+/// The generic denylist/shape floor, then the Junos vocabulary pass on top.
 fn floor_then_junos(run: &str) -> String {
     mecmcp_redact::junos::redact_log_text(&mecmcp_redact::redact_text(run))
 }
 
-/// Whether `line` is one of the Junos session-logging statements the
-/// vocabulary pass already handles correctly on its own, ASCII
-/// case-insensitive (see [`redact_cli_text`] for why such a line must skip
-/// the generic floor).
-fn is_session_line(line: &str) -> bool {
-    line.to_ascii_lowercase().contains("session")
+/// Closed vocabulary of Junos CLI session-logging keywords that are not
+/// credentials (firewall-rule logging flags, not secrets — the CLI
+/// counterpart of the JSON field names in [`KEY_EXEMPTIONS`]) but that
+/// substring-match the shared crate's `session` denylist entry. Whole-word,
+/// ASCII case-insensitive (see [`mask_session_tokens`]).
+const SESSION_TOKENS: &[&str] = &[
+    "session-init",
+    "session-close",
+    "limit-session",
+    "session-timeout",
+];
+
+/// Marker character wrapping each placeholder [`mask_session_tokens`]
+/// substitutes. Chosen from the Unicode Private Use Area, which Junos CLI
+/// text never legitimately contains, so it cannot collide with real input
+/// and is not itself mistaken for a secret shape by the floor.
+const SESSION_TOKEN_MARKER: char = '\u{E000}';
+
+/// Whether `c` can be part of a Junos CLI keyword, for the whole-word
+/// boundary check in [`mask_session_tokens`]: letters, digits, and `-` (the
+/// character Junos uses to join compound keywords like `session-init`).
+fn is_keyword_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-'
 }
 
-/// Whether `input` is shaped like XML: trimmed of leading whitespace, it
-/// starts with `<` followed by an XML name-start character, a `?`
+/// Replace every whole-word, case-insensitive occurrence of a
+/// [`SESSION_TOKENS`] entry in `input` with an inert placeholder
+/// (`SESSION_TOKEN_MARKER`, an index, `SESSION_TOKEN_MARKER`), returning the
+/// masked text and the exact original (case-preserved) substring for each
+/// placeholder in order, for [`unmask_session_tokens`] to restore.
+///
+/// A whole-word match requires a non-keyword character (or start/end of
+/// input) on both sides, so `session-init` does not match inside a longer
+/// compound like `session-initiate-log` — the character following the
+/// match there is `-`, which [`is_keyword_char`] counts as part of the word.
+fn mask_session_tokens(input: &str) -> (String, Vec<String>) {
+    let chars: Vec<char> = input.chars().collect();
+    let lower: Vec<char> = input.to_ascii_lowercase().chars().collect();
+    let mut out = String::with_capacity(input.len());
+    let mut originals = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let left_ok = i == 0 || !is_keyword_char(chars[i - 1]);
+        let matched = left_ok.then(|| {
+            SESSION_TOKENS.iter().find_map(|token| {
+                let token_chars: Vec<char> = token.chars().collect();
+                let end = i + token_chars.len();
+                if end > lower.len() || lower[i..end] != token_chars[..] {
+                    return None;
+                }
+                let right_ok = end == chars.len() || !is_keyword_char(chars[end]);
+                right_ok.then_some(end)
+            })
+        });
+        if let Some(Some(end)) = matched {
+            originals.push(chars[i..end].iter().collect());
+            out.push(SESSION_TOKEN_MARKER);
+            out.push_str(&(originals.len() - 1).to_string());
+            out.push(SESSION_TOKEN_MARKER);
+            i = end;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    (out, originals)
+}
+
+/// Restore each placeholder [`mask_session_tokens`] substituted, from
+/// `originals`, into `input`.
+///
+/// A placeholder that the floor's own redaction swallowed (for example a
+/// real secret earlier on the same line caused the rest of the line to be
+/// replaced with [`REDACTED`]) is simply absent from `input` by the time
+/// this runs — there is nothing to restore, and the surrounding
+/// `[REDACTED]` already covers it, so that is not a bug, just a stricter
+/// redaction than the vocabulary token alone needed.
+fn unmask_session_tokens(input: &str, originals: &[String]) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != SESSION_TOKEN_MARKER {
+            out.push(c);
+            continue;
+        }
+        let mut digits = String::new();
+        while let Some(&d) = chars.peek() {
+            if d == SESSION_TOKEN_MARKER {
+                break;
+            }
+            digits.push(d);
+            chars.next();
+        }
+        match (
+            chars.next(),
+            digits.parse::<usize>().ok().and_then(|i| originals.get(i)),
+        ) {
+            (Some(SESSION_TOKEN_MARKER), Some(original)) => out.push_str(original),
+            _ => {
+                // Malformed marker: not produced by `mask_session_tokens`,
+                // so fail closed rather than guess at its meaning.
+                out.push_str(REDACTED);
+            }
+        }
+    }
+    out
+}
+
+/// Whether `input` is shaped like XML: trimmed of leading whitespace (and a
+/// leading UTF-8 BOM, `U+FEFF`, which a plain `trim_start()` does not strip
+/// since it is not `char::is_whitespace` — Percy MEC-2594 F3), it starts
+/// with `<` followed by an XML name-start character, a `?`
 /// (`<?xml ...?>`), or a `!` (`<!--`/`<!DOCTYPE`). A shape test only, not a
 /// parse — see [`redact_config_diff`] for why the dispatch must not be
 /// parse-outcome-based.
 fn looks_like_xml_shaped(input: &str) -> bool {
-    let mut chars = input.trim_start().chars();
+    let mut chars = input
+        .trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
+        .chars();
     chars.next() == Some('<')
         && matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || matches!(c, '_' | ':' | '?' | '!'))
 }
@@ -625,6 +716,7 @@ mod tests {
     fn config_diff_cli_text_session_words_survive_but_a_real_secret_is_redacted() {
         let config_diff = "set security policies ... then log session-init session-close\n\
              set security screen ids-option X limit-session destination-ip-based 1000\n\
+             set security flow session-timeout 60\n\
              set system root-authentication encrypted-password \"$9$QQfakehash\""; // gitleaks:allow -- fabricated Junos $9$ fixture, not a real key
         let out = redact_secrets(json!({ "config_diff": config_diff }));
         let redacted = out["config_diff"]
@@ -633,6 +725,7 @@ mod tests {
         assert!(redacted.contains("session-init"), "got: {redacted}");
         assert!(redacted.contains("session-close"), "got: {redacted}");
         assert!(redacted.contains("limit-session"), "got: {redacted}");
+        assert!(redacted.contains("session-timeout"), "got: {redacted}");
         assert!(
             !redacted.contains("QQfakehash"),
             "the real secret must still be redacted: {redacted}"
@@ -705,6 +798,60 @@ mod tests {
             .expect("config_diff is a string");
         assert!(!redacted.contains("URLPWZZ1"), "got: {redacted}");
         assert!(!redacted.contains("PWZZ1"), "got: {redacted}");
+    }
+
+    /// Percy MEC-2594 F1: a single-line CLI `config_diff` (SDC's declared
+    /// `format=CLI` deploy-diff rendering) carrying a session-logging
+    /// statement alongside several non-vocabulary secrets must still have
+    /// every secret redacted. Before the fix, `is_session_line` matched the
+    /// whole line on the `session` substring and routed it around the
+    /// generic floor entirely, so everything else on that line — a TLS
+    /// passphrase, a REST API token, a URL credential, a `password:`
+    /// pair — passed through unredacted.
+    #[test]
+    fn config_diff_cli_single_line_session_token_does_not_disable_the_floor() {
+        let config_diff = "set security policies p1 then log session-init \
+             set services ssl initiation-profile p1 passphrase PASSZZ10 \
+             set system services rest api-token TOKZZ10 \
+             source url https://user:URLPWZZ10@host/x \
+             password: PWZZ10";
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(redacted.contains("session-init"), "got: {redacted}");
+        assert!(!redacted.contains("PASSZZ10"), "got: {redacted}");
+        assert!(!redacted.contains("TOKZZ10"), "got: {redacted}");
+        assert!(!redacted.contains("URLPWZZ10"), "got: {redacted}");
+        assert!(!redacted.contains("PWZZ10"), "got: {redacted}");
+    }
+
+    /// Percy MEC-2594 F1 (b): a multi-line body where only an *object name*
+    /// contains `session` — not a session-logging statement at all — must
+    /// not shield a real secret sitting on that same line. `is_session_line`
+    /// matched on the substring alone, so a profile named `session-prof`
+    /// disabled the floor for its whole line.
+    #[test]
+    fn config_diff_cli_session_named_object_does_not_shield_a_passphrase_on_the_same_line() {
+        let config_diff = "set services ssl initiation-profile session-prof passphrase PASSZZ11\n\
+             set system root-authentication encrypted-password \"$9$QQfakehash2\""; // gitleaks:allow -- fabricated Junos $9$ fixture, not a real key
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(!redacted.contains("PASSZZ11"), "got: {redacted}");
+        assert!(!redacted.contains("QQfakehash2"), "got: {redacted}");
+    }
+
+    /// Percy MEC-2594 F3: a leading UTF-8 BOM (`U+FEFF`) is not
+    /// `char::is_whitespace`, so a plain `trim_start()` left it in front of
+    /// `<` and this malformed body was misclassified as CLI text — taking
+    /// the CLI path's redaction, which leaves non-vocabulary, non-secret
+    /// text untouched, instead of this crate's fail-closed XML policy.
+    #[test]
+    fn config_diff_bom_prefixed_malformed_xml_fails_closed_to_wholesale_redaction() {
+        let out = redact_secrets(json!({ "config_diff": "\u{feff}<policy><unclosed>" }));
+        assert_eq!(out["config_diff"], REDACTED);
     }
 
     /// A `config_diff` that is not XML-shaped by [`looks_like_xml_shaped`]
