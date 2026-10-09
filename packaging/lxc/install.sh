@@ -309,22 +309,38 @@ if [[ ! -e "$tokens_path" ]]; then
         printf '%s\n' ">>   <restart the unit if it was running, then confirm its state>"
         printf '%s\n' ">>   shred -u $legacy_tokens_path   # secure erase, not rm"
     else
-        printf '%s\n' '{"version":1,"tokens":[]}' >"$tokens_path"
+        # Re-check immediately before creation: the managed_destinations check
+        # ran before apt-get/sysusers/tmpfiles, so time has passed and the path
+        # is in a directory the service account can write to.
+        reject_unsafe_file "$tokens_path"
+        tmp_tokens=$(mktemp)
+        printf '%s\n' '{"version":1,"tokens":[]}' >"$tmp_tokens"
+        install -m 0600 "$tmp_tokens" "$tokens_path"
+        rm -f "$tmp_tokens"
     fi
 fi
 if [[ ! -e "$hmac_path" ]]; then
-    umask 077
-    head -c 32 /dev/urandom >"$hmac_path"
+    reject_unsafe_file "$hmac_path"
+    tmp_hmac=$(mktemp)
+    (umask 077; head -c 32 /dev/urandom >"$tmp_hmac")
+    install -m 0600 "$tmp_hmac" "$hmac_path"
+    rm -f "$tmp_hmac"
 fi
-# Apply 0600 only to files that exist. tokens_path may be absent when a legacy
-# store exists, in which case the runtime serves the legacy file and warns.
+# Re-validate immediately before chmod/chown too: these two files may
+# already have existed from a prior install, in which case the create
+# blocks above never ran and the only guard so far was the earlier
+# managed_destinations check, before the apt-get/sysusers/tmpfiles work.
+reject_unsafe_file "$hmac_path"
 chmod 0600 "$hmac_path"
 if [[ -e "$tokens_path" ]]; then
+    reject_unsafe_file "$tokens_path"
     chmod 0600 "$tokens_path"
 fi
 if (( live_install )); then
+    reject_unsafe_file "$hmac_path"
     chown rustsdcmcp:rustsdcmcp "$hmac_path"
     if [[ -e "$tokens_path" ]]; then
+        reject_unsafe_file "$tokens_path"
         chown rustsdcmcp:rustsdcmcp "$tokens_path"
     fi
 fi
