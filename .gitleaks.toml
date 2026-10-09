@@ -37,3 +37,18 @@ paths = [
   '''(^|/)crates/rustsdcmcp-core/src/projection\.rs$''',
 ]
 targetRules = ["junos-type9-secret"]
+
+# redact.rs's config_diff_cli_text_session_words_survive_but_a_real_secret_is_redacted
+# test (MEC-2519) asserts a Junos `set system root-authentication
+# encrypted-password "$9$..."` statement in a CLI-format config_diff is still
+# redacted even though sibling `session-init`/`session-close`/`limit-session`
+# words in the same fixture must survive. The hash is a synthetic literal
+# typed directly into the test, not a $9$ hash captured from a real device.
+[[allowlists]]
+description = "Synthetic $9$-shaped literal in redact.rs config_diff CLI-text test (MEC-2519), not a real device secret"
+condition = "AND"
+commits = ["c41321d3db3bbba2d44191596e574ea5c26b8775"]
+paths = [
+  '''(^|/)crates/rustsdcmcp-core/src/redact\.rs$''',
+]
+targetRules = ["junos-type9-secret"]
