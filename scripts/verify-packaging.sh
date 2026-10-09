@@ -226,6 +226,52 @@ assert_installer_post_jq_validation_order() {
 }
 assert_installer_post_jq_validation_order
 
+# Guard against the destination changing between the layout check and the
+# point of use: every chmod/chown of either managed path must be immediately
+# preceded (ignoring blank lines) by its own freshly re-run reject_unsafe_file
+# call, and neither path may be created via a direct redirect -- only via
+# mktemp + install(1).
+# shellcheck disable=SC2016  # these are literal source fragments, not expansions
+assert_installer_reguards_before_mutation() {
+    local -a guard_pairs=(
+        'reject_unsafe_file "$hmac_path"|chmod 0600 "$hmac_path"'
+        'reject_unsafe_file "$tokens_path"|chmod 0600 "$tokens_path"'
+        'reject_unsafe_file "$hmac_path"|chown rustsdcmcp:rustsdcmcp "$hmac_path"'
+        'reject_unsafe_file "$tokens_path"|chown -h rustsdcmcp:rustsdcmcp "$tokens_path"'
+        'reject_unsafe_file "$tokens_path"|runuser -u rustsdcmcp -- chmod 0600 "$tokens_path"'
+    )
+    local pair guard mutation mutation_line prev_line prev_text
+    local -a mutation_lines=()
+    for pair in "${guard_pairs[@]}"; do
+        guard=${pair%%|*}
+        mutation=${pair#*|}
+        mapfile -t mutation_lines < <(logical_line_numbers "$mutation" "$installer")
+        [[ ${#mutation_lines[@]} -ge 1 ]] || fail "missing '$mutation' in $installer"
+        for mutation_line in "${mutation_lines[@]}"; do
+            prev_line=$((mutation_line - 1))
+            while [[ -z "$(sed -n "${prev_line}p" "$installer" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')" ]]; do
+                prev_line=$((prev_line - 1))
+                (( prev_line > 0 )) || fail "no preceding guard for '$mutation' in $installer"
+            done
+            prev_text=$(sed -n "${prev_line}p" "$installer" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+            [[ "$prev_text" == "$guard" ]] \
+                || fail "'$mutation' at $installer:$mutation_line is not immediately preceded by '$guard'"
+        done
+    done
+    if grep -Fq '>"$tokens_path"' "$installer"; then
+        fail 'tokens.json must be created via mktemp + install(1), not a direct redirect'
+    fi
+    if grep -Fq '>"$hmac_path"' "$installer"; then
+        fail 'audit-hmac.key must be created via mktemp + install(1), not a direct redirect'
+    fi
+    require_contains 'install -m 0600 "$tokens_tmp" "$tokens_path"' "$installer"
+    require_contains 'install -m 0600 "$hmac_tmp" "$hmac_path"' "$installer"
+    if grep -Fq 'chown rustsdcmcp:rustsdcmcp "$tokens_path"' "$installer"; then
+        fail 'tokens.json chown must use chown -h, not a plain follow-symlink chown'
+    fi
+}
+assert_installer_reguards_before_mutation
+
 service_directive_values() {
     local key=$1
     awk -v key="$key" '
@@ -503,6 +549,10 @@ if errors:
 PY
 then
     fail 'server.json does not match the registry contract'
+fi
+
+if [[ -x packaging/lxc/tests/test_installer_path_guard.sh ]]; then
+    packaging/lxc/tests/test_installer_path_guard.sh
 fi
 
 printf '%s\n' 'packaging policy verification passed'
