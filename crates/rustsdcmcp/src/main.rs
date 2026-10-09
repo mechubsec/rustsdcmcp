@@ -3,6 +3,8 @@
 use anyhow::{Context, Result};
 use mecmcp_auth::{NoGrant, TokenStoreFile};
 use mecmcp_runtime::cli::{Cli, Command, ParsedCli, Transport};
+use mecmcp_secret::naming::{ServerNaming, known};
+use mecmcp_secret::validate::{CredentialFileRole, CredentialFileSpec, validate_credential_files};
 use rmcp::ServiceExt as _;
 use rustsdcmcp::{KNOWN_TOOLS, SdcHandler, SighupHandler, serve_http};
 use rustsdcmcp_core::{ChangeManager, SdcClient, SdcConfig};
@@ -128,6 +130,29 @@ fn resolve<T>(supplied_on_cli: bool, from_cli: T, from_config: T) -> T {
     }
 }
 
+/// Layout for this server. `known::SDC` is the deployed name (`rustsdcmcp`),
+/// so these paths stay the ones already on disk.
+fn server_naming() -> ServerNaming {
+    ServerNaming::derive(known::SDC)
+}
+
+/// Canonical token store and the legacy `/etc` location an unmigrated
+/// install may still be using.
+fn token_store_paths() -> (PathBuf, PathBuf) {
+    let naming = server_naming();
+    (
+        naming.state_dir.join("tokens.json"),
+        naming.config_dir.join("tokens.json"),
+    )
+}
+
+/// `EnvironmentFile` the packaged unit reads. Absent for a process whose
+/// credential is already in the environment, so a missing file is not a
+/// failure; a present file with a loose mode is.
+fn credentials_env_path() -> PathBuf {
+    server_naming().config_dir.join("credentials.env")
+}
+
 /// Resolve the token store, applying the legacy fallback ONLY for the canonical path.
 ///
 /// The migration fallback exists so an upgrade that has not yet moved
@@ -137,11 +162,77 @@ fn resolve<T>(supplied_on_cli: bool, from_cli: T, from_config: T) -> T {
 /// or revoked credentials. A non-canonical path is loaded directly and fails if
 /// absent, which is the honest outcome.
 fn resolve_tokens(configured: &std::path::Path) -> Result<mecmcp_auth::ResolvedTokenPath> {
-    resolve_tokens_with(
-        configured,
-        std::path::Path::new("/var/lib/rustsdcmcp/tokens.json"),
-        std::path::Path::new("/etc/rustsdcmcp/tokens.json"),
-    )
+    let (canonical, legacy) = token_store_paths();
+    resolve_tokens_with(configured, &canonical, &legacy)
+}
+
+/// Files whose mode is checked together, before any of them is loaded.
+///
+/// A startup that checks one file and exits reports the next bad mode only
+/// on the next restart. [`validate_startup_credentials`] asks
+/// `mecmcp-secret` to report every offender in this list at once.
+struct StartupCredentialFiles<'a> {
+    /// `sdc.json`. Required. Holds no secret, so group-read (`0640`) is allowed.
+    config: &'a Path,
+    /// Packaged `credentials.env`. Checked only when the path is present.
+    credentials_env: Option<&'a Path>,
+    /// Bearer-token store this process will load. Required when set.
+    tokens: Option<&'a Path>,
+    /// Audit HMAC key. Required when set; the caller creates a missing key first.
+    audit_hmac_key: Option<&'a Path>,
+    /// Approval digest key from `--approval-digest-key-file`. Required when set.
+    approval_digest_key: Option<&'a Path>,
+}
+
+/// Check every credential-adjacent file in one pass.
+///
+/// Existing paths are unchanged: the config path is whatever
+/// `--device-mapping` names, and the token path is the one
+/// [`resolve_tokens`] already selected, including the legacy `/etc` store
+/// when that fallback is in effect.
+fn validate_startup_credentials(files: &StartupCredentialFiles<'_>) -> Result<()> {
+    let mut specs = Vec::with_capacity(5);
+    specs.push(CredentialFileSpec {
+        path: files.config,
+        role: CredentialFileRole::ConfigNoSecret,
+        description: "SDC tenant configuration",
+        required: true,
+    });
+    if let Some(path) = files.credentials_env {
+        specs.push(CredentialFileSpec {
+            path,
+            role: CredentialFileRole::Secret,
+            description: "SDC API credential file",
+            required: false,
+        });
+    }
+    if let Some(path) = files.tokens {
+        specs.push(CredentialFileSpec {
+            path,
+            role: CredentialFileRole::Secret,
+            description: "bearer token store",
+            required: true,
+        });
+    }
+    if let Some(path) = files.audit_hmac_key {
+        specs.push(CredentialFileSpec {
+            path,
+            role: CredentialFileRole::Secret,
+            description: "audit HMAC key",
+            required: true,
+        });
+    }
+    if let Some(path) = files.approval_digest_key {
+        specs.push(CredentialFileSpec {
+            path,
+            role: CredentialFileRole::Secret,
+            description: "approval digest key",
+            required: true,
+        });
+    }
+
+    validate_credential_files(&specs)?;
+    Ok(())
 }
 
 /// The rule behind [`resolve_tokens`], with the two well-known paths injected so
@@ -684,10 +775,28 @@ async fn main() -> Result<()> {
         args.allow_no_auth,
     )
     .map_err(|error| anyhow::anyhow!("{error}"))?;
+    // Resolve before the mode pass so a legacy `/etc` store is the file that
+    // gets checked, not the canonical path that is not there yet.
+    let tokens_resolved = match &auth_mode {
+        Some(AuthMode::Tokens(path)) => Some(resolve_tokens(path)?),
+        None | Some(AuthMode::NoAuth) => None,
+    };
 
     if let Some(key_path) = args.audit_hmac_key_file.as_deref() {
         ensure_audit_hmac_key(key_path).context("pre-provisioning audit HMAC key file")?;
     }
+
+    let credentials_env = credentials_env_path();
+    validate_startup_credentials(&StartupCredentialFiles {
+        config: &args.device_mapping,
+        credentials_env: Some(&credentials_env),
+        tokens: tokens_resolved
+            .as_ref()
+            .map(|resolved| resolved.path.as_path()),
+        audit_hmac_key: args.audit_hmac_key_file.as_deref(),
+        approval_digest_key: args.approval_digest_key_file.as_deref(),
+    })
+    .context("credential file validation")?;
 
     let redaction = if args.audit_redact.trim().is_empty() {
         None
@@ -842,14 +951,19 @@ async fn main() -> Result<()> {
     )?);
     let handler = SdcHandler::new(Arc::<str>::from(config.tenant.as_str()), client, changes);
 
-    let token_store = match auth_mode {
-        None => None,
-        Some(AuthMode::Tokens(path)) => {
-            let resolved = resolve_tokens(&path)?;
+    if matches!(auth_mode, Some(AuthMode::NoAuth)) {
+        tracing::warn!(
+            "--allow-no-auth: Streamable HTTP accepts unauthenticated requests on loopback"
+        );
+    }
 
+    let token_store = match tokens_resolved {
+        None => None,
+        Some(resolved) => {
             if resolved.used_fallback {
+                let (canonical, _) = token_store_paths();
                 tracing::warn!(
-                    primary = %"/var/lib/rustsdcmcp/tokens.json",
+                    primary = %canonical.display(),
                     fallback = %resolved.path.display(),
                     "Token file not found at primary location; using fallback. \
                      Migration required: move the token file to the primary location \
@@ -899,12 +1013,6 @@ async fn main() -> Result<()> {
             }
 
             Some(store)
-        }
-        Some(AuthMode::NoAuth) => {
-            tracing::warn!(
-                "--allow-no-auth: Streamable HTTP accepts unauthenticated requests on loopback"
-            );
-            None
         }
     };
 
@@ -1540,6 +1648,87 @@ mod approval_digest_key_tests {
             error.to_string().contains("approval-digest-key-file"),
             "{error}"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used)]
+mod startup_credential_tests {
+    use super::{StartupCredentialFiles, validate_startup_credentials};
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn write_file(dir: &std::path::Path, name: &str, mode: u32) -> std::path::PathBuf {
+        let path = dir.join(name);
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(b"{}\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    /// Two loose modes must come back together. The failure this guards is a
+    /// startup that names the first file, exits, and only names the second
+    /// after that restart.
+    #[test]
+    fn one_pass_reports_every_bad_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = write_file(dir.path(), "sdc.json", 0o644);
+        let tokens = write_file(dir.path(), "tokens.json", 0o640);
+
+        let error = validate_startup_credentials(&StartupCredentialFiles {
+            config: &config,
+            credentials_env: None,
+            tokens: Some(&tokens),
+            audit_hmac_key: None,
+            approval_digest_key: None,
+        })
+        .expect_err("both files are looser than their role allows");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("2 credential file"),
+            "expected both failures in one error, got {message}"
+        );
+        assert!(message.contains("sdc.json"), "{message}");
+        assert!(message.contains("tokens.json"), "{message}");
+        assert!(message.contains("0644"), "{message}");
+        assert!(message.contains("0640"), "{message}");
+    }
+
+    /// `0600` is inside the `0640` ceiling for a no-secret config, and a
+    /// `0600` token store is the secret role. Both must pass together.
+    #[test]
+    fn acceptable_modes_pass_in_one_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = write_file(dir.path(), "sdc.json", 0o640);
+        let tokens = write_file(dir.path(), "tokens.json", 0o600);
+
+        validate_startup_credentials(&StartupCredentialFiles {
+            config: &config,
+            credentials_env: None,
+            tokens: Some(&tokens),
+            audit_hmac_key: None,
+            approval_digest_key: None,
+        })
+        .expect("0640 config and 0600 tokens are the packaged modes");
+    }
+
+    /// A locked-down config (`0600`) is stricter than `0640` and must still
+    /// start. A missing optional credential file is not a failure.
+    #[test]
+    fn owner_only_config_and_missing_optional_file_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = write_file(dir.path(), "sdc.json", 0o600);
+        let missing = dir.path().join("credentials.env");
+
+        validate_startup_credentials(&StartupCredentialFiles {
+            config: &config,
+            credentials_env: Some(&missing),
+            tokens: None,
+            audit_hmac_key: None,
+            approval_digest_key: None,
+        })
+        .expect("0600 config and an absent optional credential file must pass");
     }
 }
 
