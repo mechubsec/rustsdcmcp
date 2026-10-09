@@ -31,8 +31,8 @@ I/O therefore protect the management plane rather than merely decorate it.
 
 ## Current status
 
-`rustsdcmcp` exposes **73 MCP tools** (on `main` and unreleased branches; v0.0.5
-shipped 54): 59 bounded read tools and 14 change-control tools. The surface
+`rustsdcmcp` exposes **74 MCP tools** (v0.1.0 and `main`): 60 bounded read
+tools and 14 change-control tools. The surface
 covers the part of the SDC API that manages SRX devices and their policy; the
 rest of the product's API is deliberately out of scope.
 
@@ -78,23 +78,13 @@ Observed response shapes and the remaining endpoint questions are tracked in
 
 ## Download
 
-Assets for the current release are on the
-[`v0.0.5` release page](https://github.com/mechubsec/rustsdcmcp/releases/tag/v0.0.5).
-The Debian archive is commit-addressed and ships with a sibling `.sha256`:
+The current release, [`v0.1.0`](https://github.com/mechubsec/rustsdcmcp/releases/tag/v0.1.0),
+has no downloadable tarball asset yet — build from approved source below until
+one is attached.
 
-```console
-gh release download v0.0.5 \
-  --repo mechubsec/rustsdcmcp \
-  --pattern 'rustsdcmcp_0.0.5.*_amd64.tar.gz*'
-sha256sum -c rustsdcmcp_0.0.5.*_amd64.tar.gz.sha256
-```
-
-Take the expected checksum from the release page over an authenticated
-connection. A `.sha256` carried alongside the tarball only proves that the two
-files agree, so it is not independent evidence of either.
-
-A `linux/amd64` container image is published for the same tag to
-`ghcr.io/mechubsec/rustsdcmcp:0.0.5`.
+A `linux/amd64` container image is published for that tag to
+`ghcr.io/mechubsec/rustsdcmcp:0.1.0` and is publicly pullable with no
+authentication.
 
 ## Build from approved source
 
@@ -104,7 +94,7 @@ intend to ship before building, testing, or packaging — the release tag is the
 usual choice:
 
 ```console
-approved_commit=$(git rev-parse v0.0.5^{commit})
+approved_commit=$(git rev-parse v0.1.0^{commit})
 git checkout --detach "$approved_commit"
 test "$(git rev-parse HEAD)" = "$approved_commit"
 cargo build --release --locked
@@ -146,11 +136,13 @@ Prerequisites:
   `api.sdcloud.juniperclouds.net`.
 - Root or equivalent operator access inside the LXC.
 
-After downloading the release assets, install the verified package:
+`v0.1.0` has no release tarball asset yet, so build one from approved source
+(see [Build from approved source](#build-from-approved-source) above) and
+install the verified package:
 
 ```bash
 set -euo pipefail
-mapfile -t archives < <(find . -maxdepth 1 -type f -name 'rustsdcmcp_0.0.5.*_amd64.tar.gz' -print)
+mapfile -t archives < <(find . -maxdepth 1 -type f -name 'rustsdcmcp_0.1.0.*_amd64.tar.gz' -print)
 test "${#archives[@]}" -eq 1
 archive="${archives[0]}"
 sha256sum -c "$archive.sha256"
