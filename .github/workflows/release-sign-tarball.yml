@@ -33,6 +33,13 @@ on:
         required: true
         type: string
 
+# Serializes runs per tag so a board backfill dispatched while the
+# release's own `release: published` run is still in flight can't race it
+# past the bundle-exists guard and both end up building/signing at once.
+concurrency:
+  group: release-sign-tarball-${{ github.event.inputs.tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+
 jobs:
   resolve-tag:
     name: Verify signed published tag
