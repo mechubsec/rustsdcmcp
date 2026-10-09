@@ -52,17 +52,3 @@ paths = [
   '''(^|/)crates/rustsdcmcp-core/src/redact\.rs$''',
 ]
 targetRules = ["junos-type9-secret"]
-
-# redact.rs's config_diff_cli_text_pem_block_is_redacted test (MEC-2564)
-# asserts a bare PEM block in a CLI-format config_diff is still redacted. The
-# fixture is a synthetic, truncated PEM literal ("AAAA" body, no real key
-# material) typed directly into the test, not a key captured from a real
-# device or config.
-[[allowlists]]
-description = "Synthetic PEM literal in redact.rs config_diff CLI-text test (MEC-2564), not a real key"
-condition = "AND"
-commits = ["df90d431fe144a1a377ab948a10ea5c8898ce426"]
-paths = [
-  '''(^|/)crates/rustsdcmcp-core/src/redact\.rs$''',
-]
-targetRules = ["private-key"]

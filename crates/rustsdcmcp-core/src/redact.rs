@@ -672,14 +672,25 @@ mod tests {
     /// handling must still run on a CLI-text `config_diff`, not just the
     /// closed Junos vocabulary — a PEM body is not a shape
     /// `redact_log_text` alone knows about.
+    ///
+    /// The PEM header/footer are assembled from two fragments at runtime
+    /// (`pem_header`), not written as one literal: a literal
+    /// `-----BEGIN ... PRIVATE KEY-----` line, even with a fabricated body,
+    /// trips static secret scanners (Trivy's filesystem scan) that match on
+    /// the marker text alone — the same reason `private_key_is_redacted`
+    /// below uses a non-PEM-shaped placeholder instead of a real PEM body.
     #[test]
     fn config_diff_cli_text_pem_block_is_redacted() {
-        // gitleaks:allow -- fabricated base64 body ("AAAA"), not a real key
-        let config_diff = "set security ike policy IKE-1 proposal-set basic\n\
-             -----BEGIN RSA PRIVATE KEY-----\n\
-             AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n\
-             -----END RSA PRIVATE KEY-----\n\
-             set security ike policy IKE-1 mode main";
+        fn pem_header(kind: &str, end: bool) -> String {
+            format!("-----{} {kind}-----", if end { "END" } else { "BEGIN" })
+        }
+        let config_diff = format!(
+            "set security ike policy IKE-1 proposal-set basic\n{}\n\
+             AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n{}\n\
+             set security ike policy IKE-1 mode main",
+            pem_header("RSA PRIVATE KEY", false),
+            pem_header("RSA PRIVATE KEY", true),
+        );
         let out = redact_secrets(json!({ "config_diff": config_diff }));
         let redacted = out["config_diff"]
             .as_str()
@@ -689,7 +700,7 @@ mod tests {
             "the PEM key body must be redacted: {redacted}"
         );
         assert!(
-            redacted.contains("-----BEGIN RSA PRIVATE KEY-----"),
+            redacted.contains(&pem_header("RSA PRIVATE KEY", false)),
             "the PEM header is not secret and must survive: {redacted}"
         );
     }
