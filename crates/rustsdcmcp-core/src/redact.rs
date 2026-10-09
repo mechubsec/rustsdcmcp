@@ -153,10 +153,83 @@ pub fn redact_secrets(mut value: Value) -> Value {
 /// reasoning `mecmcp_redact::junos`'s own shape-based dispatch uses.
 fn redact_config_diff(raw: &str) -> String {
     if looks_like_xml_shaped(raw) {
-        mecmcp_redact::redact_xml_str(raw).unwrap_or_else(|_| REDACTED.to_owned())
+        let scrubbed = redact_xml_comments_and_pis(raw);
+        mecmcp_redact::redact_xml_str(&scrubbed).unwrap_or_else(|_| REDACTED.to_owned())
     } else {
         redact_cli_text(raw)
     }
+}
+
+/// Blank the body of every XML comment and non-declaration processing
+/// instruction before the shape-aware redactor runs.
+///
+/// `mecmcp_redact::redact_xml_str` (shared crate v0.26.0) only scans element
+/// and attribute content; comment (`<!-- ... -->`) and PI (`<? ... ?>`)
+/// bodies pass through untouched (Percy MEC-2594 F2). A deploy diff never
+/// legitimately carries operator secrets in a comment — Junos/SDC annotate
+/// via `<junos:comment>` elements, which the element-content scan already
+/// covers — so this fails closed by blanking every comment/PI body
+/// unconditionally rather than trying to tell a real secret apart from a
+/// note. The leading `<?xml ...?>` declaration is left alone since it never
+/// carries operator content and rewriting it has no security value.
+fn redact_xml_comments_and_pis(input: &str) -> String {
+    redact_xml_pis(&redact_xml_comments(input))
+}
+
+fn redact_xml_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    loop {
+        let Some(start) = rest.find("<!--") else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 4..];
+        let Some(end) = after.find("-->") else {
+            // Unterminated comment: leave as-is, the XML parser will reject it.
+            out.push_str(&rest[start..]);
+            break;
+        };
+        out.push_str("<!--");
+        out.push_str(REDACTED);
+        out.push_str("-->");
+        rest = &after[end + 3..];
+    }
+    out
+}
+
+fn redact_xml_pis(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    loop {
+        let Some(start) = rest.find("<?") else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let after_marker = &rest[start + 2..];
+        let is_decl = after_marker.len() >= 3
+            && after_marker.as_bytes()[..3].eq_ignore_ascii_case(b"xml")
+            && after_marker
+                .as_bytes()
+                .get(3)
+                .is_none_or(|b| b.is_ascii_whitespace() || *b == b'?');
+        let Some(end) = after_marker.find("?>") else {
+            // Unterminated PI: leave as-is, the XML parser will reject it.
+            out.push_str(&rest[start..]);
+            break;
+        };
+        if is_decl {
+            out.push_str(&rest[start..start + 2 + end + 2]);
+        } else {
+            out.push_str("<?");
+            out.push_str(REDACTED);
+            out.push_str("?>");
+        }
+        rest = &after_marker[end + 2..];
+    }
+    out
 }
 
 /// Redact a Junos CLI `set`-command `config_diff` body.
@@ -673,6 +746,62 @@ mod tests {
         assert!(
             redacted.contains("session-init"),
             "session-init must survive: {redacted}"
+        );
+    }
+
+    /// A secret hidden in an XML comment (Percy MEC-2594 F2) must not survive
+    /// just because the generic element/attribute scan never looks inside
+    /// comment bodies.
+    #[test]
+    fn config_diff_xml_comment_body_is_redacted() {
+        let config_diff = "<configuration><!-- password: QQsupersecret1 --><a/></configuration>";
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(
+            !redacted.contains("QQsupersecret1"),
+            "a secret inside a comment must be redacted: {redacted}"
+        );
+        assert!(
+            redacted.contains("<a/>"),
+            "content outside the comment must survive: {redacted}"
+        );
+    }
+
+    /// A secret hidden in a non-declaration processing instruction (Percy
+    /// MEC-2594 F2) must not survive.
+    #[test]
+    fn config_diff_xml_processing_instruction_body_is_redacted() {
+        let config_diff = "<configuration><?note password: QQsupersecret2?><a/></configuration>";
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(
+            !redacted.contains("QQsupersecret2"),
+            "a secret inside a PI must be redacted: {redacted}"
+        );
+        assert!(
+            redacted.contains("<a/>"),
+            "content outside the PI must survive: {redacted}"
+        );
+    }
+
+    /// The leading `<?xml ...?>` declaration must survive untouched — it
+    /// never carries operator content, and the F2 fix must not mistake it
+    /// for a redactable PI.
+    #[test]
+    fn config_diff_xml_declaration_survives_comment_and_pi_scrubbing() {
+        let config_diff =
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><configuration><a/></configuration>";
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(
+            redacted.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"),
+            "the xml declaration must survive unchanged: {redacted}"
         );
     }
 
