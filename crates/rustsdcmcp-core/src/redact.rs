@@ -152,11 +152,16 @@ pub fn redact_secrets(mut value: Value) -> Value {
 ///   text/attributes under a denylisted *element*, not an entire sibling
 ///   subtree. Fails closed to [`REDACTED`] wholesale if the body does not
 ///   parse — this crate never guesses at malformed XML.
-/// - Otherwise (Junos CLI `set`-command text): [`mecmcp_redact::junos`]'s
-///   `redact_log_text`, a closed, Junos-specific keyword vocabulary that
-///   already excludes `session`/`limit-session`/`session-init` (it has no
-///   `session` entry at all) while still catching every Junos secret
-///   statement (`pre-shared-key`, `secret`, `*-password`, a crypt hash, ...).
+/// - Otherwise (Junos CLI `set`-command text): [`redact_cli_text`], which
+///   runs [`mecmcp_redact::junos::redact_log_text`] — a closed,
+///   Junos-specific keyword vocabulary that already excludes
+///   `session`/`limit-session`/`session-init` (it has no `session` entry at
+///   all) — under the generic floor for every line that is not itself a
+///   `session` statement, so a secret shape outside that closed vocabulary
+///   (a PEM block, an upper-case `PRE-SHARED-KEY`, `key: value`, a URL
+///   credential, ...) does not pass through either (mecmcp/rustsdcmcp#241
+///   review F1). See that function's doc comment for why the floor cannot
+///   simply run over every line unconditionally.
 ///
 /// The shape check happens *before* either redactor runs, never by trying
 /// one and falling back on a parse error: picking the path by parse outcome
@@ -167,8 +172,75 @@ fn redact_config_diff(raw: &str) -> String {
     if looks_like_xml_shaped(raw) {
         mecmcp_redact::redact_xml_str(raw).unwrap_or_else(|_| REDACTED.to_owned())
     } else {
-        mecmcp_redact::junos::redact_log_text(raw)
+        redact_cli_text(raw)
     }
+}
+
+/// Redact a Junos CLI `set`-command `config_diff` body.
+///
+/// [`mecmcp_redact::junos::redact_log_text`] alone (what this called before)
+/// is the closed Junos keyword vocabulary: it never over-redacts a
+/// `session`-bearing statement, but it also only knows the secret shapes
+/// Junos itself names (`pre-shared-key`, `*-password`, a crypt hash, ...). A
+/// secret shape outside that vocabulary — a bare PEM block, an upper-case
+/// `PRE-SHARED-KEY` statement (the vocabulary match is case-sensitive), a
+/// `key: value` or URL-userinfo credential, a `passphrase`/`api-token`
+/// statement — passed straight through
+/// (mecmcp/rustsdcmcp#241 review F1). [`mecmcp_redact::redact_text`] is the
+/// generic floor every other tool-output scan runs under, and it does catch
+/// all of those, but it is also the pass whose denylisted-key substring
+/// match on `session` caused the over-redaction this crate's `config_diff`
+/// handling exists to avoid (see [`redact_config_diff`]'s doc comment and
+/// mecmcp/rustsdcmcp#238).
+///
+/// This runs the generic floor under the Junos pass, like
+/// [`mecmcp_redact::junos::redact_log_artefact`] does, but only over the
+/// contiguous runs of lines that do not themselves contain `session`
+/// (ASCII case-insensitive, matching every statement the vocabulary already
+/// protects: `session-init`, `session-close`, `limit-session`, ...) — a
+/// `session`-bearing line skips the floor entirely and goes through the
+/// vocabulary pass alone, so it can never be over-redacted.
+///
+/// Splitting into runs (rather than every line standalone) keeps the
+/// floor's own cross-line state — an open PEM block, a YAML block scalar —
+/// intact for any run that does not itself contain a `session` line; one
+/// that opens across a `session` line boundary is not reconstructed, the
+/// same accepted cost as a non-vocabulary secret sharing a line with a
+/// `session` word (mecmcp/rustsdcmcp#241 review F1's documented residual
+/// risk).
+fn redact_cli_text(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut run = String::new();
+    for line in raw.split_inclusive('\n') {
+        if is_session_line(line) {
+            if !run.is_empty() {
+                out.push_str(&floor_then_junos(&run));
+                run.clear();
+            }
+            out.push_str(&mecmcp_redact::junos::redact_log_text(line));
+        } else {
+            run.push_str(line);
+        }
+    }
+    if !run.is_empty() {
+        out.push_str(&floor_then_junos(&run));
+    }
+    out
+}
+
+/// The generic denylist/shape floor, then the Junos vocabulary pass on top —
+/// see [`redact_cli_text`] for why both run over a `session`-free run.
+fn floor_then_junos(run: &str) -> String {
+    mecmcp_redact::junos::redact_log_text(&mecmcp_redact::redact_text(run))
+}
+
+/// Whether `line` contains the substring `session`, ASCII case-insensitive —
+/// the same substring [`mecmcp_redact`]'s shared denylist matches on real
+/// `session_id`/`session_token` fields, and the reason a Junos
+/// `session-init`/`limit-session` statement must skip the generic floor
+/// (see [`redact_cli_text`]).
+fn is_session_line(line: &str) -> bool {
+    line.to_ascii_lowercase().contains("session")
 }
 
 /// Whether `input` is shaped like XML: trimmed of leading whitespace, it
@@ -594,6 +666,81 @@ mod tests {
             !redacted.contains("QQfakehash"),
             "the real secret must still be redacted: {redacted}"
         );
+    }
+
+    /// mecmcp/rustsdcmcp#241 review F1: the generic floor's PEM-block
+    /// handling must still run on a CLI-text `config_diff`, not just the
+    /// closed Junos vocabulary — a PEM body is not a shape
+    /// `redact_log_text` alone knows about.
+    #[test]
+    fn config_diff_cli_text_pem_block_is_redacted() {
+        // gitleaks:allow -- fabricated base64 body ("AAAA"), not a real key
+        let config_diff = "set security ike policy IKE-1 proposal-set basic\n\
+             -----BEGIN RSA PRIVATE KEY-----\n\
+             AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n\
+             -----END RSA PRIVATE KEY-----\n\
+             set security ike policy IKE-1 mode main";
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(
+            !redacted.contains("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            "the PEM key body must be redacted: {redacted}"
+        );
+        assert!(
+            redacted.contains("-----BEGIN RSA PRIVATE KEY-----"),
+            "the PEM header is not secret and must survive: {redacted}"
+        );
+    }
+
+    /// mecmcp/rustsdcmcp#241 review F1: a Junos secret statement outside the
+    /// closed `redact_log_text` vocabulary (`passphrase`, `api-token`,
+    /// upper-case `PRE-SHARED-KEY`) must still be caught by the generic
+    /// floor.
+    #[test]
+    fn config_diff_cli_text_non_vocabulary_secret_keywords_are_redacted() {
+        let config_diff = "set services ssl initiation-profile p1 passphrase PASSZZ1\n\
+             set system services rest api-token TOKZZ1\n\
+             SET SECURITY IKE PROPOSAL P1 PRE-SHARED-KEY ASCII-TEXT PSKZZ3";
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(!redacted.contains("PASSZZ1"), "got: {redacted}");
+        assert!(!redacted.contains("TOKZZ1"), "got: {redacted}");
+        assert!(!redacted.contains("PSKZZ3"), "got: {redacted}");
+    }
+
+    /// mecmcp/rustsdcmcp#241 review F1: a URL-embedded credential and a
+    /// `password:`/JSON-style key-value pair are shapes the closed Junos
+    /// vocabulary does not look for at all, but the generic floor does.
+    #[test]
+    fn config_diff_cli_text_url_and_keyvalue_credentials_are_redacted() {
+        let config_diff = "set system syslog host x structured-data\n\
+             # upstream source url https://user:URLPWZZ1@host/x\n\
+             password: PWZZ1";
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(!redacted.contains("URLPWZZ1"), "got: {redacted}");
+        assert!(!redacted.contains("PWZZ1"), "got: {redacted}");
+    }
+
+    /// mecmcp/rustsdcmcp#241 review F1: a `config_diff` that is not
+    /// XML-shaped by [`looks_like_xml_shaped`] (it does not start with `<`)
+    /// but still carries an embedded XML secret element later on must not
+    /// have that element pass through just because it took the CLI path.
+    #[test]
+    fn config_diff_non_xml_shaped_body_with_embedded_secret_element_is_redacted() {
+        let config_diff = "Warning: preview truncated\n\
+             <a><pre-shared-key><ascii-text>PSKZZW</ascii-text></pre-shared-key></a>";
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(!redacted.contains("PSKZZW"), "got: {redacted}");
     }
 
     #[test]
