@@ -30,6 +30,12 @@
 //!   them can hide a policy rule's real logging state from the model
 //!   reviewing a write, MEC-973 F1).
 //!
+//! A third thing is handled outside the generic scan entirely, not through
+//! the `Profile`: `config_diff` (the rendered firewall-policy preview/deploy
+//! body) is pulled out of the tree, redacted by [`redact_config_diff`], and
+//! spliced back in — see that function's doc comment for why the generic
+//! scan must never see its raw *or* its redacted form.
+//!
 //! ## Redaction policy
 //!
 //! `finish_redacted` is used for every read tool, with no per-family
@@ -107,10 +113,391 @@ fn normalize_key(key: &str) -> String {
 ///
 /// `null` stays `null`: it carries no secret, and rewriting it would claim
 /// one existed.
+///
+/// `config_diff` fields are pulled out before the generic scan runs and
+/// spliced back in afterward, redacted by `redact_config_diff` instead —
+/// see that function's doc comment for why.
 #[must_use]
 pub fn redact_secrets(mut value: Value) -> Value {
+    let diffs = take_config_diffs(&mut value);
     mecmcp_redact::redact_json_value_with_profile(&mut value, &PROFILE);
+    restore_config_diffs(&mut value, diffs);
     value
+}
+
+/// Redact one `config_diff` body (the rendered firewall-policy preview or
+/// deploy diff `prepare_sdc_policy_deploy`, `get_sdc_preview_device_result`,
+/// and `get_sdc_deploy_device_result` return).
+///
+/// SDC renders this field as a *single line*, in one of two vendor shapes
+/// depending on which endpoint produced it: `preview_device_result` always
+/// requests `format=XML` (Junos NETCONF-style XML); `deploy_device_result`
+/// always requests `format=CLI` (Junos `set`-command text). [`mecmcp_redact`]'s
+/// generic, line-oriented scan is not shape-aware and is not safe to run
+/// directly over a document rendered as a single line, so this dispatches on
+/// `config_diff`'s own shape to a matching structure- or vocabulary-aware
+/// redactor instead, each of which distinguishes a real secret from Junos
+/// syntax that merely shares a keyword with the shared denylist:
+/// - XML-shaped: [`mecmcp_redact::redact_xml_str`], which redacts only the
+///   text/attributes under a denylisted *element*, not an entire sibling
+///   subtree. Fails closed to [`REDACTED`] wholesale if the body does not
+///   parse — this crate never guesses at malformed XML.
+/// - Otherwise (Junos CLI `set`-command text): [`redact_cli_text`]. See that
+///   function's doc comment for how it combines the shared crate's generic
+///   scan with its Junos-specific keyword vocabulary.
+///
+/// The shape check happens *before* either redactor runs, never by trying
+/// one and falling back on a parse error: picking the path by parse outcome
+/// is a parser differential (two diffs of the same kind could take
+/// different redaction paths over incidental byte content), the same
+/// reasoning `mecmcp_redact::junos`'s own shape-based dispatch uses.
+fn redact_config_diff(raw: &str) -> String {
+    if looks_like_xml_shaped(raw) {
+        let scrubbed = redact_xml_comments_and_pis(raw);
+        mecmcp_redact::redact_xml_str(&scrubbed).unwrap_or_else(|_| REDACTED.to_owned())
+    } else {
+        redact_cli_text(raw)
+    }
+}
+
+/// Blank the body of every XML comment and processing instruction before
+/// the shape-aware redactor runs, since it only scans element and attribute
+/// content.
+///
+/// A deploy diff never legitimately carries operator content in a comment
+/// or PI — Junos/SDC annotate via `<junos:comment>` elements, which the
+/// element-content scan already covers — so this fails closed by blanking
+/// every comment/PI body unconditionally rather than trying to tell a real
+/// secret apart from a note. The sole exemption is a well-formed `<?xml
+/// version="..." ...?>` declaration, and only when it is the first thing in
+/// the document: see [`is_xml_declaration`].
+fn redact_xml_comments_and_pis(input: &str) -> String {
+    redact_xml_pis(&redact_xml_comments(input))
+}
+
+fn redact_xml_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    loop {
+        let Some(start) = rest.find("<!--") else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 4..];
+        let Some(end) = after.find("-->") else {
+            // Unterminated comment: leave as-is, the XML parser will reject it.
+            out.push_str(&rest[start..]);
+            break;
+        };
+        out.push_str("<!--");
+        out.push_str(REDACTED);
+        out.push_str("-->");
+        rest = &after[end + 3..];
+    }
+    out
+}
+
+fn redact_xml_pis(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    // Only the very first processing instruction in the document can ever
+    // be the leading declaration; every later one is exempted from nothing.
+    let mut can_be_declaration = true;
+    loop {
+        let Some(start) = rest.find("<?") else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let before = &rest[..start];
+        let at_document_start = can_be_declaration
+            && before
+                .trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
+                .is_empty();
+        let after_marker = &rest[start + 2..];
+        let Some(end) = after_marker.find("?>") else {
+            // Unterminated PI: leave as-is, the XML parser will reject it.
+            out.push_str(&rest[start..]);
+            break;
+        };
+        let pi_body = &after_marker[..end];
+        if at_document_start && is_xml_declaration(pi_body) {
+            out.push_str(&rest[start..start + 2 + end + 2]);
+        } else {
+            out.push_str("<?");
+            out.push_str(REDACTED);
+            out.push_str("?>");
+        }
+        can_be_declaration = false;
+        rest = &after_marker[end + 2..];
+    }
+    out
+}
+
+/// Whether `pi_body` (a processing instruction's content, without the
+/// surrounding `<?`/`?>`) is a well-formed XML declaration: target `xml`
+/// (case-insensitive), then `version="..."`, then an optional
+/// `encoding="..."`, then an optional `standalone="yes"` or `standalone="no"`,
+/// in that order, and nothing else. Attribute values must not themselves
+/// contain whitespace, which real version/encoding/standalone values never
+/// do; anything that doesn't fit this exact shape is rejected rather than
+/// guessed at.
+fn is_xml_declaration(pi_body: &str) -> bool {
+    if pi_body.len() < 4
+        || !pi_body.as_bytes()[..3].eq_ignore_ascii_case(b"xml")
+        || !pi_body.as_bytes()[3].is_ascii_whitespace()
+    {
+        return false;
+    }
+    let mut tokens = pi_body[3..].split_ascii_whitespace();
+    if !tokens
+        .next()
+        .is_some_and(|tok| xml_decl_attr(tok, "version").is_some())
+    {
+        return false;
+    }
+    let mut tok = tokens.next();
+    if let Some(t) = tok
+        && xml_decl_attr(t, "encoding").is_some()
+    {
+        tok = tokens.next();
+    }
+    if let Some(t) = tok {
+        match xml_decl_attr(t, "standalone") {
+            Some(v) if v == "yes" || v == "no" => tok = tokens.next(),
+            _ => return false,
+        }
+    }
+    tok.is_none()
+}
+
+/// Whether `tok` is exactly `name="value"` (no surrounding whitespace), and
+/// if so, its value.
+fn xml_decl_attr<'a>(tok: &'a str, name: &str) -> Option<&'a str> {
+    tok.strip_prefix(name)?
+        .strip_prefix('=')?
+        .strip_prefix('"')?
+        .strip_suffix('"')
+}
+
+/// Redact a Junos CLI `set`-command `config_diff` body.
+///
+/// Combines two passes so that neither one's blind spot is load-bearing on
+/// its own: [`mecmcp_redact::junos::redact_log_text`]'s closed, Junos-aware
+/// keyword vocabulary, and the shared crate's generic denylist/shape scan as
+/// a floor underneath it, the same layering
+/// [`mecmcp_redact::junos::redact_log_artefact`] uses elsewhere in the
+/// shared crate.
+///
+/// The floor's own denylist substring-matches `session`, so it cannot
+/// simply run over a Junos session-logging statement like
+/// `session-init`/`session-close`/`limit-session`/`session-timeout`: its
+/// line-oriented scan would treat the keyword as a denylisted key and
+/// redact the rest of that line, which on SDC's single-line CLI rendering
+/// (see [`redact_config_diff`]'s doc comment) is the entire body.
+///
+/// This masks only the closed [`SESSION_TOKENS`] vocabulary with an inert
+/// placeholder before the floor runs over the *whole*, unsplit body, then
+/// swaps the placeholders back — everything else on a session-statement
+/// line, including a real secret, still goes through the floor.
+fn redact_cli_text(raw: &str) -> String {
+    let (masked, originals) = mask_session_tokens(raw);
+    let redacted = floor_then_junos(&masked);
+    unmask_session_tokens(&redacted, &originals)
+}
+
+/// The generic denylist/shape floor, then the Junos vocabulary pass on top.
+fn floor_then_junos(run: &str) -> String {
+    mecmcp_redact::junos::redact_log_text(&mecmcp_redact::redact_text(run))
+}
+
+/// Closed vocabulary of Junos CLI session-logging keywords that are not
+/// credentials (firewall-rule logging flags, not secrets — the CLI
+/// counterpart of the JSON field names in [`KEY_EXEMPTIONS`]) but that
+/// substring-match the shared crate's `session` denylist entry. Whole-word,
+/// ASCII case-insensitive (see [`mask_session_tokens`]).
+const SESSION_TOKENS: &[&str] = &[
+    "session-init",
+    "session-close",
+    "limit-session",
+    "session-timeout",
+];
+
+/// Marker character wrapping each placeholder [`mask_session_tokens`]
+/// substitutes. Chosen from the Unicode Private Use Area, which Junos CLI
+/// text never legitimately contains, so it cannot collide with real input
+/// and is not itself mistaken for a secret shape by the floor.
+const SESSION_TOKEN_MARKER: char = '\u{E000}';
+
+/// Whether `c` can be part of a Junos CLI keyword, for the whole-word
+/// boundary check in [`mask_session_tokens`]: letters, digits, and `-` (the
+/// character Junos uses to join compound keywords like `session-init`).
+fn is_keyword_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-'
+}
+
+/// Replace every whole-word, case-insensitive occurrence of a
+/// [`SESSION_TOKENS`] entry in `input` with an inert placeholder
+/// (`SESSION_TOKEN_MARKER`, an index, `SESSION_TOKEN_MARKER`), returning the
+/// masked text and the exact original (case-preserved) substring for each
+/// placeholder in order, for [`unmask_session_tokens`] to restore.
+///
+/// A whole-word match requires a non-keyword character (or start/end of
+/// input) on both sides, so `session-init` does not match inside a longer
+/// compound like `session-initiate-log` — the character following the
+/// match there is `-`, which [`is_keyword_char`] counts as part of the word.
+fn mask_session_tokens(input: &str) -> (String, Vec<String>) {
+    let chars: Vec<char> = input.chars().collect();
+    let lower: Vec<char> = input.to_ascii_lowercase().chars().collect();
+    let mut out = String::with_capacity(input.len());
+    let mut originals = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let left_ok = i == 0 || !is_keyword_char(chars[i - 1]);
+        let matched = left_ok.then(|| {
+            SESSION_TOKENS.iter().find_map(|token| {
+                let token_chars: Vec<char> = token.chars().collect();
+                let end = i + token_chars.len();
+                if end > lower.len() || lower[i..end] != token_chars[..] {
+                    return None;
+                }
+                let right_ok = end == chars.len() || !is_keyword_char(chars[end]);
+                right_ok.then_some(end)
+            })
+        });
+        if let Some(Some(end)) = matched {
+            originals.push(chars[i..end].iter().collect());
+            out.push(SESSION_TOKEN_MARKER);
+            out.push_str(&(originals.len() - 1).to_string());
+            out.push(SESSION_TOKEN_MARKER);
+            i = end;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    (out, originals)
+}
+
+/// Restore each placeholder [`mask_session_tokens`] substituted, from
+/// `originals`, into `input`.
+///
+/// A placeholder that the floor's own redaction swallowed (for example a
+/// real secret earlier on the same line caused the rest of the line to be
+/// replaced with [`REDACTED`]) is simply absent from `input` by the time
+/// this runs — there is nothing to restore, and the surrounding
+/// `[REDACTED]` already covers it, so that is not a bug, just a stricter
+/// redaction than the vocabulary token alone needed.
+fn unmask_session_tokens(input: &str, originals: &[String]) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != SESSION_TOKEN_MARKER {
+            out.push(c);
+            continue;
+        }
+        let mut digits = String::new();
+        while let Some(&d) = chars.peek() {
+            if d == SESSION_TOKEN_MARKER {
+                break;
+            }
+            digits.push(d);
+            chars.next();
+        }
+        match (
+            chars.next(),
+            digits.parse::<usize>().ok().and_then(|i| originals.get(i)),
+        ) {
+            (Some(SESSION_TOKEN_MARKER), Some(original)) => out.push_str(original),
+            _ => {
+                // Malformed marker: not produced by `mask_session_tokens`,
+                // so fail closed rather than guess at its meaning.
+                out.push_str(REDACTED);
+            }
+        }
+    }
+    out
+}
+
+/// Whether `input` is shaped like XML: trimmed of leading whitespace and a
+/// leading UTF-8 BOM (`U+FEFF`), it starts with `<` followed by an XML
+/// name-start character, a `?` (`<?xml ...?>`), or a `!`
+/// (`<!--`/`<!DOCTYPE`). A shape test only, not a parse — see
+/// [`redact_config_diff`] for why the dispatch must not be
+/// parse-outcome-based.
+fn looks_like_xml_shaped(input: &str) -> bool {
+    let mut chars = input
+        .trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
+        .chars();
+    chars.next() == Some('<')
+        && matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || matches!(c, '_' | ':' | '?' | '!'))
+}
+
+/// Remove every `config_diff` string field from `value`, at any depth
+/// (`device_results[*].config_diff` for the batch preview shape,
+/// `config_diff` at the top level for the single-device shape), returning
+/// each one's raw content keyed by the JSON Pointer to its *parent* object.
+///
+/// Removing rather than leaving the raw text in place is what keeps the
+/// generic denylist-and-shape scan in [`redact_secrets`] from ever seeing
+/// it: that scan's line-oriented `redact_text` pass is exactly the one
+/// [`redact_config_diff`] exists to route around, and it would otherwise
+/// corrupt the body before this function's own, more precise pass ever ran.
+fn take_config_diffs(value: &mut Value) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    take_config_diffs_inner(value, &mut String::new(), &mut out);
+    out
+}
+
+fn take_config_diffs_inner(
+    value: &mut Value,
+    pointer: &mut String,
+    out: &mut Vec<(String, String)>,
+) {
+    match value {
+        Value::Object(map) => {
+            if matches!(map.get("config_diff"), Some(Value::String(_)))
+                && let Some(Value::String(raw)) = map.remove("config_diff")
+            {
+                out.push((pointer.clone(), raw));
+            }
+            for (key, child) in map.iter_mut() {
+                let mark = pointer.len();
+                pointer.push('/');
+                pointer.push_str(&key.replace('~', "~0").replace('/', "~1"));
+                take_config_diffs_inner(child, pointer, out);
+                pointer.truncate(mark);
+            }
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter_mut().enumerate() {
+                let mark = pointer.len();
+                pointer.push('/');
+                pointer.push_str(&index.to_string());
+                take_config_diffs_inner(item, pointer, out);
+                pointer.truncate(mark);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+/// Redact each `(parent pointer, raw config_diff)` pair [`take_config_diffs`]
+/// removed, via [`redact_config_diff`], and reinsert it into `value` at its
+/// original location. A pointer that no longer resolves to an object (should
+/// never happen — nothing between removal and this call can reshape `value`)
+/// is skipped rather than panicking: losing one diff is safer than a panic
+/// on tool-output redaction, which every read tool depends on.
+fn restore_config_diffs(value: &mut Value, diffs: Vec<(String, String)>) {
+    for (pointer, raw) in diffs {
+        if let Some(Value::Object(map)) = value.pointer_mut(&pointer) {
+            map.insert(
+                "config_diff".to_owned(),
+                Value::String(redact_config_diff(&raw)),
+            );
+        }
+    }
 }
 
 /// Whether `value` carries the [`REDACTED`] marker in any string, at any depth.
@@ -350,6 +737,336 @@ mod tests {
         assert_eq!(iface["psk"], REDACTED);
         assert_eq!(iface["site_config"], REDACTED);
         assert_eq!(iface["ike_id"], "id");
+    }
+
+    /// A one-line XML `config_diff` with a `<session-init/>` element must
+    /// not lose everything after it, including a later `operation="delete"`
+    /// entry — the preview exists to show deletes. A `create` policy whose
+    /// `then log` clause uses `session-init`, followed by a `delete` policy.
+    #[test]
+    fn config_diff_xml_session_init_does_not_swallow_a_later_delete() {
+        let config_diff = concat!(
+            "<policy operation=\"create\"><name>BLOCK-SHOPPING-KALI</name>",
+            "<then><log><session-init/><session-close/></log><deny/></then></policy>",
+            "<policy operation=\"delete\"><name>OLD-RULE</name></policy>",
+        );
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(
+            redacted.contains(r#"operation="delete""#),
+            "the delete entry after session-init must survive: {redacted}"
+        );
+        assert!(
+            redacted.contains("OLD-RULE"),
+            "the deleted rule's name must survive: {redacted}"
+        );
+        assert!(
+            redacted.contains("session-init") && redacted.contains("session-close"),
+            "session-init/session-close are not secrets and must survive: {redacted}"
+        );
+    }
+
+    /// The same XML `config_diff` shape, but with a real secret
+    /// (`pre-shared-key`) alongside the non-secret `session-init` element:
+    /// the secret must still be redacted structurally.
+    #[test]
+    fn config_diff_xml_still_redacts_a_real_secret_alongside_session_init() {
+        let config_diff = concat!(
+            "<policy operation=\"create\"><name>P1</name>",
+            "<then><log><session-init/></log></then></policy>",
+            "<ike><pre-shared-key><ascii-text>QQsupersecret1</ascii-text></pre-shared-key></ike>",
+        );
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(
+            !redacted.contains("QQsupersecret1"),
+            "the real secret must be redacted: {redacted}"
+        );
+        assert!(
+            redacted.contains("session-init"),
+            "session-init must survive: {redacted}"
+        );
+    }
+
+    /// A secret hidden in an XML comment must not survive just because the
+    /// generic element/attribute scan never looks inside comment bodies.
+    #[test]
+    fn config_diff_xml_comment_body_is_redacted() {
+        let config_diff = "<configuration><!-- password: QQsupersecret1 --><a/></configuration>";
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(
+            !redacted.contains("QQsupersecret1"),
+            "a secret inside a comment must be redacted: {redacted}"
+        );
+        assert!(
+            redacted.contains("<a/>"),
+            "content outside the comment must survive: {redacted}"
+        );
+    }
+
+    /// A secret hidden in a non-declaration processing instruction must not
+    /// survive.
+    #[test]
+    fn config_diff_xml_processing_instruction_body_is_redacted() {
+        let config_diff = "<configuration><?note password: QQsupersecret2?><a/></configuration>";
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(
+            !redacted.contains("QQsupersecret2"),
+            "a secret inside a PI must be redacted: {redacted}"
+        );
+        assert!(
+            redacted.contains("<a/>"),
+            "content outside the PI must survive: {redacted}"
+        );
+    }
+
+    /// The leading `<?xml ...?>` declaration must survive untouched — it
+    /// never carries operator content.
+    #[test]
+    fn config_diff_xml_declaration_survives_comment_and_pi_scrubbing() {
+        let config_diff =
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><configuration><a/></configuration>";
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(
+            redacted.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"),
+            "the xml declaration must survive unchanged: {redacted}"
+        );
+    }
+
+    /// The declaration exemption only applies to the first processing
+    /// instruction in the document, and only when its body is shaped exactly
+    /// like a declaration (`version="..."`, optional `encoding`/`standalone`).
+    /// A later PI, even one that also names the `xml` target, is a regular
+    /// PI and must be blanked.
+    #[test]
+    fn config_diff_xml_declaration_exemption_does_not_apply_mid_document() {
+        let config_diff =
+            "<?xml version=\"1.0\" note=\"password: PWZZ30\"?><configuration><a/></configuration>";
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(!redacted.contains("PWZZ30"), "got: {redacted}");
+    }
+
+    /// A PI naming the `xml` target that appears after other content is not
+    /// the leading declaration and must be blanked, regardless of its body.
+    #[test]
+    fn config_diff_xml_pi_naming_xml_target_mid_document_is_redacted() {
+        let config_diff = "<configuration><a/><?xml password: PWZZ31?></configuration>";
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(!redacted.contains("PWZZ31"), "got: {redacted}");
+    }
+
+    /// The `xml` target match is case-insensitive for the exemption check,
+    /// same as the shape it must still satisfy.
+    #[test]
+    fn config_diff_xml_declaration_target_match_is_case_insensitive_but_still_shape_checked() {
+        let config_diff = "<?XML version=\"1.0\" note=\"password: PWZZ32\"?><configuration/>";
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(!redacted.contains("PWZZ32"), "got: {redacted}");
+    }
+
+    /// Malformed XML fails closed: the whole `config_diff` body is withheld
+    /// rather than guessed at or passed through unredacted.
+    #[test]
+    fn config_diff_malformed_xml_fails_closed_to_wholesale_redaction() {
+        let out = redact_secrets(json!({ "config_diff": "<policy><unclosed>" }));
+        assert_eq!(out["config_diff"], REDACTED);
+    }
+
+    /// `config_diff` nested under `device_results[*]` — the shape
+    /// `prepare_sdc_policy_deploy`'s batch preview returns — must be found
+    /// and redacted the same way as the top-level, single-device shape.
+    #[test]
+    fn config_diff_nested_under_device_results_array_is_redacted() {
+        let config_diff = concat!(
+            "<policy operation=\"create\"><then><log><session-init/></log></then></policy>",
+            "<policy operation=\"delete\"><name>OLD</name></policy>",
+        );
+        let out = redact_secrets(json!({
+            "device_results": [
+                { "device_id": "d1", "config_diff": config_diff },
+                { "device_id": "d2", "config_diff": "<policy/>" },
+            ]
+        }));
+        let first = out["device_results"][0]["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(first.contains(r#"operation="delete""#), "got: {first}");
+        assert!(first.contains("session-init"), "got: {first}");
+        assert_eq!(out["device_results"][0]["device_id"], "d1");
+        assert_eq!(out["device_results"][1]["config_diff"], "<policy/>");
+    }
+
+    /// The CLI-text counterpart: `deploy_device_result` always requests
+    /// `format=CLI`, so its `config_diff` is Junos `set`-command text, not
+    /// XML. `then log session-init;`/`limit-session X` must survive; a real
+    /// secret statement must not.
+    #[test]
+    fn config_diff_cli_text_session_words_survive_but_a_real_secret_is_redacted() {
+        let config_diff = "set security policies ... then log session-init session-close\n\
+             set security screen ids-option X limit-session destination-ip-based 1000\n\
+             set security flow session-timeout 60\n\
+             set system root-authentication encrypted-password \"$9$QQfakehash\""; // gitleaks:allow -- fabricated Junos $9$ fixture, not a real key
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(redacted.contains("session-init"), "got: {redacted}");
+        assert!(redacted.contains("session-close"), "got: {redacted}");
+        assert!(redacted.contains("limit-session"), "got: {redacted}");
+        assert!(redacted.contains("session-timeout"), "got: {redacted}");
+        assert!(
+            !redacted.contains("QQfakehash"),
+            "the real secret must still be redacted: {redacted}"
+        );
+    }
+
+    /// The generic floor's PEM-block handling must still run on a CLI-text
+    /// `config_diff`, not just the closed Junos vocabulary — a PEM body is
+    /// not a shape `redact_log_text` alone knows about.
+    ///
+    /// The PEM header/footer are assembled from two fragments at runtime
+    /// (`pem_header`), not written as one literal: a literal
+    /// `-----BEGIN ... PRIVATE KEY-----` line, even with a fabricated body,
+    /// trips static secret scanners (Trivy's filesystem scan) that match on
+    /// the marker text alone — the same reason `private_key_is_redacted`
+    /// below uses a non-PEM-shaped placeholder instead of a real PEM body.
+    #[test]
+    fn config_diff_cli_text_pem_block_is_redacted() {
+        fn pem_header(kind: &str, end: bool) -> String {
+            format!("-----{} {kind}-----", if end { "END" } else { "BEGIN" })
+        }
+        let config_diff = format!(
+            "set security ike policy IKE-1 proposal-set basic\n{}\n\
+             AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n{}\n\
+             set security ike policy IKE-1 mode main",
+            pem_header("RSA PRIVATE KEY", false),
+            pem_header("RSA PRIVATE KEY", true),
+        );
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(
+            !redacted.contains("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            "the PEM key body must be redacted: {redacted}"
+        );
+        assert!(
+            redacted.contains(&pem_header("RSA PRIVATE KEY", false)),
+            "the PEM header is not secret and must survive: {redacted}"
+        );
+    }
+
+    /// A Junos secret statement outside the closed `redact_log_text`
+    /// vocabulary must still be caught by the generic floor.
+    #[test]
+    fn config_diff_cli_text_non_vocabulary_secret_keywords_are_redacted() {
+        let config_diff = "set services ssl initiation-profile p1 passphrase PASSZZ1\n\
+             set system services rest api-token TOKZZ1\n\
+             SET SECURITY IKE PROPOSAL P1 PRE-SHARED-KEY ASCII-TEXT PSKZZ3";
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(!redacted.contains("PASSZZ1"), "got: {redacted}");
+        assert!(!redacted.contains("TOKZZ1"), "got: {redacted}");
+        assert!(!redacted.contains("PSKZZ3"), "got: {redacted}");
+    }
+
+    /// A URL-embedded credential and a `password:`/JSON-style key-value pair
+    /// are shapes the closed Junos vocabulary does not look for at all, but
+    /// the generic floor does.
+    #[test]
+    fn config_diff_cli_text_url_and_keyvalue_credentials_are_redacted() {
+        let config_diff = "set system syslog host x structured-data\n\
+             # upstream source url https://user:URLPWZZ1@host/x\n\
+             password: PWZZ1";
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(!redacted.contains("URLPWZZ1"), "got: {redacted}");
+        assert!(!redacted.contains("PWZZ1"), "got: {redacted}");
+    }
+
+    /// A single-line CLI `config_diff` (SDC's declared `format=CLI`
+    /// deploy-diff rendering) carrying a session-logging statement alongside
+    /// several non-vocabulary secrets must still have every secret redacted.
+    #[test]
+    fn config_diff_cli_single_line_session_token_does_not_disable_the_floor() {
+        let config_diff = "set security policies p1 then log session-init \
+             set services ssl initiation-profile p1 passphrase PASSZZ10 \
+             set system services rest api-token TOKZZ10 \
+             source url https://user:URLPWZZ10@host/x \
+             password: PWZZ10";
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(redacted.contains("session-init"), "got: {redacted}");
+        assert!(!redacted.contains("PASSZZ10"), "got: {redacted}");
+        assert!(!redacted.contains("TOKZZ10"), "got: {redacted}");
+        assert!(!redacted.contains("URLPWZZ10"), "got: {redacted}");
+        assert!(!redacted.contains("PWZZ10"), "got: {redacted}");
+    }
+
+    /// A multi-line body where only an *object name* contains `session` —
+    /// not a session-logging statement at all — must not shield a real
+    /// secret sitting on that same line.
+    #[test]
+    fn config_diff_cli_session_named_object_does_not_shield_a_passphrase_on_the_same_line() {
+        let config_diff = "set services ssl initiation-profile session-prof passphrase PASSZZ11\n\
+             set system root-authentication encrypted-password \"$9$QQfakehash2\""; // gitleaks:allow -- fabricated Junos $9$ fixture, not a real key
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(!redacted.contains("PASSZZ11"), "got: {redacted}");
+        assert!(!redacted.contains("QQfakehash2"), "got: {redacted}");
+    }
+
+    /// A leading UTF-8 BOM (`U+FEFF`) must not stop malformed XML from
+    /// taking this crate's fail-closed XML policy.
+    #[test]
+    fn config_diff_bom_prefixed_malformed_xml_fails_closed_to_wholesale_redaction() {
+        let out = redact_secrets(json!({ "config_diff": "\u{feff}<policy><unclosed>" }));
+        assert_eq!(out["config_diff"], REDACTED);
+    }
+
+    /// A `config_diff` that is not XML-shaped by [`looks_like_xml_shaped`]
+    /// (it does not start with `<`) but still carries an embedded XML secret
+    /// element later on must not have that element pass through just
+    /// because it took the CLI path.
+    #[test]
+    fn config_diff_non_xml_shaped_body_with_embedded_secret_element_is_redacted() {
+        let config_diff = "Warning: preview truncated\n\
+             <a><pre-shared-key><ascii-text>PSKZZW</ascii-text></pre-shared-key></a>";
+        let out = redact_secrets(json!({ "config_diff": config_diff }));
+        let redacted = out["config_diff"]
+            .as_str()
+            .expect("config_diff is a string");
+        assert!(!redacted.contains("PSKZZW"), "got: {redacted}");
     }
 
     #[test]
