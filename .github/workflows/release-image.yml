@@ -16,13 +16,22 @@ jobs:
       # caller, never widened, so this job must grant them itself -- see
       # mecmcp's docs/RELEASE-WORKFLOWS.md.
       id-token: write
-    # Pinned past v0.26.1 to pick up #501 (max-mode provenance + SBOM
-    # attestation on the pushed image); no mecmcp release past v0.26.1
-    # exists yet, so this is an unreleased main commit, not a tag.
-    uses: mechubsec/mecmcp/.github/workflows/reusable-release-image.yml@42989f693f5b73cf0a951d74881cdd22b02d6785 # main, post-v0.26.1 (#501)
+    # mecmcp v0.27.0. reusable-release-image.yml is the same file as
+    # 42989f6 (#501); this pin is the released tag, and the caller opts
+    # into the Docker Hub inputs that file already declares.
+    uses: mechubsec/mecmcp/.github/workflows/reusable-release-image.yml@19401120439cd1420701bb59b6495bfdd3718b93 # v0.27.0
     with:
       # GHCR requires a lowercase image path; github.repository is already lowercase.
       image: ghcr.io/${{ github.repository }}
+      # Dual-push (mecmcp MEC-2110). Docker Hub org is `mechub`.
+      # Docker Hub images are linux/amd64 only, so set platforms explicitly
+      # (this is also the workflow default).
+      dockerhub-image: docker.io/mechub/rustsdcmcp
+      description: 'Security Director Cloud MCP server'
+      platforms: linux/amd64
+    secrets:
+      dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+      dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
 
   scan:
     name: Scan pushed image
