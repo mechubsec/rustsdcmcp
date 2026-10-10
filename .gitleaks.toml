@@ -3,19 +3,22 @@ title = "rustsdcmcp gitleaks config"
 [extend]
 path = ".gitleaks-vendor.toml"
 
-# crates/rustsdcmcp-core/src/redact.rs's private_key_is_redacted test (added in
-# 400327e, MEC-345) asserts redact_secrets() scrubs a private_key field. The
-# fixture value is a synthetic, truncated PEM literal ("AAAA" body, no real
-# key material) used only to trip the default private-key rule's denylist
-# check; it is not a credential that ever touched a device. (mecmcp#392 dropped
-# the redundant custom pem-private-key rule since the default private-key rule
-# already covers all key types, so this allowlist now targets only that rule.)
+# crates/rustsdcmcp-core/src/redact.rs has multiple tests (private_key_is_redacted,
+# MEC-345; config_diff_cli_text_pem_block_is_redacted) that assert redact_secrets()
+# scrubs PEM private-key bodies. The fixture value is a synthetic, truncated PEM
+# body (repeated "A" characters, no real key material) used only to trip the
+# default private-key rule's denylist check; it is not a credential that ever
+# touched a device. Matched by content rather than by commit SHA/line, so this
+# entry keeps covering the fixture across future edits to the file instead of
+# breaking every time an unrelated change shifts this test's blame commit/line.
 [[allowlists]]
-description = "Synthetic PEM literal in redact.rs private_key_is_redacted test (MEC-345), not a real key"
+description = "Synthetic PEM literal in redact.rs private-key tests (MEC-345), not a real key"
 condition = "AND"
-commits = ["400327e76226f72819616354d14d84e5b9e6153d"]
 paths = [
   '''(^|/)crates/rustsdcmcp-core/src/redact\.rs$''',
+]
+regexes = [
+  '''A{20,}''',
 ]
 targetRules = ["private-key"]
 
