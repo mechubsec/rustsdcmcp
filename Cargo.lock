@@ -531,7 +531,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1219,8 +1219,8 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mecmcp-audit"
-version = "0.26.0"
-source = "git+https://github.com/mechubsec/mecmcp?tag=v0.26.0#927361a755ceb5a43289275ab5f5f00d66359cc3"
+version = "0.27.0"
+source = "git+https://github.com/mechubsec/mecmcp?tag=v0.27.0#19401120439cd1420701bb59b6495bfdd3718b93"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1249,8 +1249,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-auth"
-version = "0.26.0"
-source = "git+https://github.com/mechubsec/mecmcp?tag=v0.26.0#927361a755ceb5a43289275ab5f5f00d66359cc3"
+version = "0.27.0"
+source = "git+https://github.com/mechubsec/mecmcp?tag=v0.27.0#19401120439cd1420701bb59b6495bfdd3718b93"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -1268,8 +1268,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-changeset"
-version = "0.26.0"
-source = "git+https://github.com/mechubsec/mecmcp?tag=v0.26.0#927361a755ceb5a43289275ab5f5f00d66359cc3"
+version = "0.27.0"
+source = "git+https://github.com/mechubsec/mecmcp?tag=v0.27.0#19401120439cd1420701bb59b6495bfdd3718b93"
 dependencies = [
  "async-trait",
  "getrandom 0.4.3",
@@ -1293,8 +1293,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-redact"
-version = "0.26.0"
-source = "git+https://github.com/mechubsec/mecmcp?tag=v0.26.0#927361a755ceb5a43289275ab5f5f00d66359cc3"
+version = "0.27.0"
+source = "git+https://github.com/mechubsec/mecmcp?tag=v0.27.0#19401120439cd1420701bb59b6495bfdd3718b93"
 dependencies = [
  "hmac",
  "quick-xml",
@@ -1306,12 +1306,13 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-runtime"
-version = "0.26.0"
-source = "git+https://github.com/mechubsec/mecmcp?tag=v0.26.0#927361a755ceb5a43289275ab5f5f00d66359cc3"
+version = "0.27.0"
+source = "git+https://github.com/mechubsec/mecmcp?tag=v0.27.0#19401120439cd1420701bb59b6495bfdd3718b93"
 dependencies = [
  "anyhow",
  "clap",
  "getrandom 0.4.3",
+ "http",
  "mecmcp-audit",
  "mecmcp-auth",
  "mecmcp-secret",
@@ -1324,8 +1325,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-secret"
-version = "0.26.0"
-source = "git+https://github.com/mechubsec/mecmcp?tag=v0.26.0#927361a755ceb5a43289275ab5f5f00d66359cc3"
+version = "0.27.0"
+source = "git+https://github.com/mechubsec/mecmcp?tag=v0.27.0#19401120439cd1420701bb59b6495bfdd3718b93"
 dependencies = [
  "rustix",
  "thiserror",
@@ -1334,8 +1335,8 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-server"
-version = "0.26.0"
-source = "git+https://github.com/mechubsec/mecmcp?tag=v0.26.0#927361a755ceb5a43289275ab5f5f00d66359cc3"
+version = "0.27.0"
+source = "git+https://github.com/mechubsec/mecmcp?tag=v0.27.0#19401120439cd1420701bb59b6495bfdd3718b93"
 dependencies = [
  "http",
  "mecmcp-audit",
@@ -1351,11 +1352,12 @@ dependencies = [
 
 [[package]]
 name = "mecmcp-transport"
-version = "0.26.0"
-source = "git+https://github.com/mechubsec/mecmcp?tag=v0.26.0#927361a755ceb5a43289275ab5f5f00d66359cc3"
+version = "0.27.0"
+source = "git+https://github.com/mechubsec/mecmcp?tag=v0.27.0#19401120439cd1420701bb59b6495bfdd3718b93"
 dependencies = [
  "axum",
  "axum-server",
+ "chrono",
  "dashmap",
  "futures",
  "http",
@@ -1837,7 +1839,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1894,7 +1896,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2330,10 +2332,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2833,7 +2835,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
