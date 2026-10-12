@@ -34,6 +34,11 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 
 ### Changed
 - The policy-deploy preview notes that drift detection relies on the upstream report.
+- Bumped the `mecmcp` dependency pin to v0.27.0 and adopted its change-set
+  API, which now carries an explicit owner on creation and a structured
+  approver identity on approval. (#250)
+- Hardened a gitleaks allowlist entry for a synthetic test fixture to match
+  by content instead of commit SHA, so it stays valid across future edits. (#248)
 
 ### Documentation
 - Fixed stale `v0.0.5` install instructions and tool count in the README. (#244)
