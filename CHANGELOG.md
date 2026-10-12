@@ -22,21 +22,15 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 
 ### Fixed
 - Device drift advisories no longer treat a missing upstream report as an in-sync result. (#228)
-- Hardens startup SIGHUP/reload handling so a signal arriving before the
-  token store has loaded is deferred instead of fatal, and the signaling CLI
-  now verifies the target process survived before reporting success. (#231)
-- Hardens credential file permission checks at startup, reporting every
-  loose file in one pass instead of one restart per file. (#242)
-- Hardens the LXC installer's file handling against unsafe writes in the
-  service-writable state directory. (#237)
-- Hardens redaction of preview/deploy diff bodies, which previously relied
-  on a line-oriented scan not safe for a document rendered on one line. (#247)
+- Hardens startup and reload signal handling. (#231)
+- Hardens startup credential file checks and error reporting. (#242)
+- Hardens the LXC installer's file handling. (#237)
+- Hardens redaction of preview and deploy output. (#247)
 
 ### Changed
 - The policy-deploy preview notes that drift detection relies on the upstream report.
-- Bumped the `mecmcp` dependency pin to v0.27.0 and adopted its change-set
-  API, which now carries an explicit owner on creation and a structured
-  approver identity on approval. (#250)
+- Bumped the `mecmcp` dependency pin to v0.27.0 and adopted its updated
+  change-set API. (#250)
 - Hardened a gitleaks allowlist entry for a synthetic test fixture to match
   by content instead of commit SHA, so it stays valid across future edits. (#248)
 
