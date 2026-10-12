@@ -50,14 +50,14 @@ uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
 
 # mecmcp is consumed at an exact pinned version. Do not relax the tag.
-mecmcp-audit = { version = "0.26.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.26.0" }
-mecmcp-auth = { version = "0.26.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.26.0" }
-mecmcp-changeset = { version = "0.26.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.26.0" }
-mecmcp-redact = { version = "0.26.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.26.0" }
-mecmcp-runtime = { version = "0.26.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.26.0" }
-mecmcp-secret = { version = "0.26.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.26.0" }
-mecmcp-server = { version = "0.26.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.26.0" }
-mecmcp-transport = { version = "0.26.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.26.0" }
+mecmcp-audit = { version = "0.27.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.27.0" }
+mecmcp-auth = { version = "0.27.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.27.0" }
+mecmcp-changeset = { version = "0.27.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.27.0" }
+mecmcp-redact = { version = "0.27.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.27.0" }
+mecmcp-runtime = { version = "0.27.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.27.0" }
+mecmcp-secret = { version = "0.27.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.27.0" }
+mecmcp-server = { version = "0.27.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.27.0" }
+mecmcp-transport = { version = "0.27.0", git = "https://github.com/mechubsec/mecmcp", tag = "v0.27.0" }
 
 [profile.release]
 lto = "thin"

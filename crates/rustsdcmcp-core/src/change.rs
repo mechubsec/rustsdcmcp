@@ -446,6 +446,7 @@ impl ChangeManager {
                 owner.clone(),
                 prepared.plan_digest().to_owned(),
                 self.object_signature.clone(),
+                None,
             )
             .await
             .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
@@ -662,6 +663,7 @@ impl ChangeManager {
                 owner.clone(),
                 prepared.plan_digest().to_owned(),
                 "firewall-policy-write-v1".to_owned(),
+                None,
             )
             .await
             .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
@@ -920,6 +922,7 @@ impl ChangeManager {
                 owner.clone(),
                 prepared.plan_digest().to_owned(),
                 self.license_signature.clone(),
+                None,
             )
             .await
             .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
@@ -1092,6 +1095,7 @@ impl ChangeManager {
                 owner.clone(),
                 prepared.plan_digest().to_owned(),
                 self.device_sync_signature.clone(),
+                None,
             )
             .await
             .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
@@ -1359,6 +1363,7 @@ impl ChangeManager {
                 owner.clone(),
                 prepared.plan_digest().to_owned(),
                 self.nat_signature.clone(),
+                None,
             )
             .await
             .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
@@ -1555,6 +1560,7 @@ impl ChangeManager {
                 owner.clone(),
                 prepared.preview_digest().to_owned(),
                 self.policy_signature.clone(),
+                None,
             )
             .await
             .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
@@ -1611,6 +1617,11 @@ impl ChangeManager {
     }
 
     /// Record an independent human principal's approval of one exact plan digest.
+    ///
+    /// This server does not yet bind approvers to a verified IdP assertion
+    /// (no `Mecmcp-Approver-Assertion` support), so the approver identity is
+    /// always the token-asserted variant: a principal name plus its token's
+    /// declared actor type.
     pub async fn approve(
         &self,
         change_set_id: String,
@@ -1618,13 +1629,16 @@ impl ChangeManager {
         expected_digest: String,
         approver_actor_type: mecmcp_audit::ActorType,
     ) -> Result<ChangeSetOutput, SdcError> {
+        let approver = mecmcp_changeset::ApproverIdentity::TokenAsserted {
+            principal: approver,
+            actor_type: approver_actor_type,
+        };
         self.coordinator
             .approve_change_set(
                 change_set_id,
                 self.tenant.clone(),
-                approver,
+                &approver,
                 expected_digest,
-                approver_actor_type,
             )
             .await
             .map_err(|error| SdcError::ChangeControl(error.to_string()))
@@ -2108,6 +2122,7 @@ mod tests {
                 "alice".to_owned(),
                 prepared.preview_digest().to_owned(),
                 manager.policy_signature.clone(),
+                None,
             )
             .await
             .expect("create change set");
@@ -2322,9 +2337,9 @@ mod tests {
     }
 
     /// A coordinator built with `approval_digest_key` set must produce the
-    /// keyed v6 approval digest, not the unkeyed v5 one.
+    /// keyed v7 approval digest, not the unkeyed v5 one.
     #[tokio::test]
-    async fn an_approval_digest_key_produces_a_v6_digest() {
+    async fn an_approval_digest_key_produces_a_v7_digest() {
         let calls = Arc::new(Calls::default());
         let app = Router::new()
             .route("/api/v1/policies/preview", post(preview))
@@ -2397,8 +2412,8 @@ mod tests {
             .as_ref()
             .expect("approval");
         assert_eq!(
-            approval.digest_version, 6,
-            "a key passed through ChangeManager::load must produce a v6 (keyed) digest, \
+            approval.digest_version, 7,
+            "a key passed through ChangeManager::load must produce a v7 (keyed) digest, \
              not the unkeyed v5 one"
         );
 
@@ -2409,7 +2424,7 @@ mod tests {
         );
         assert!(
             unkeyed_read.is_err(),
-            "a v6 digest produced through ChangeManager::load must not verify without the key"
+            "a v7 digest produced through ChangeManager::load must not verify without the key"
         );
 
         server.abort();

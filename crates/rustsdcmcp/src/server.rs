@@ -3832,6 +3832,8 @@ mod tests {
             provider_tier: None,
             on_behalf_of: None,
             actor_type: ActorType::Human,
+            oidc_subject: None,
+            verified_approver: None,
             request_id: uuid::Uuid::new_v4(),
         }
     }

@@ -342,7 +342,7 @@ GitHub issues.
 foundation shared by the mechub MCP server family. This repository consumes it,
 rather than forking it. `main` pins all eight shared crates — `mecmcp-audit`,
 `mecmcp-auth`, `mecmcp-changeset`, `mecmcp-redact`, `mecmcp-runtime`,
-`mecmcp-secret`, `mecmcp-server`, and `mecmcp-transport` — to `v0.26.0`.
+`mecmcp-secret`, `mecmcp-server`, and `mecmcp-transport` — to `v0.27.0`.
 
 **The compatibility blocker is cleared.** Earlier revisions of this section
 said a release was blocked until 59 temporary compatibility declarations were
