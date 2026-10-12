@@ -9,18 +9,34 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
-## Unreleased
+## `v0.2.0` — 2026-10-11
 
 ### Added
 
 - Official MCP Registry metadata: `server.json` for the stdio container
-  invocation, and the `io.modelcontextprotocol.server.name` image label.
+  invocation, and the `io.modelcontextprotocol.server.name` image label. (#234)
+- Published releases now attach a checksummed, cosign-signed LXC install
+  tarball. (#239)
+- Release images are dual-pushed to GHCR and Docker Hub
+  (`docker.io/mechub/rustsdcmcp`). (#243)
 
 ### Fixed
 - Device drift advisories no longer treat a missing upstream report as an in-sync result. (#228)
+- Hardens startup SIGHUP/reload handling so a signal arriving before the
+  token store has loaded is deferred instead of fatal, and the signaling CLI
+  now verifies the target process survived before reporting success. (#231)
+- Hardens credential file permission checks at startup, reporting every
+  loose file in one pass instead of one restart per file. (#242)
+- Hardens the LXC installer's file handling against unsafe writes in the
+  service-writable state directory. (#237)
+- Hardens redaction of preview/deploy diff bodies, which previously relied
+  on a line-oriented scan not safe for a document rendered on one line. (#247)
 
 ### Changed
 - The policy-deploy preview notes that drift detection relies on the upstream report.
+
+### Documentation
+- Fixed stale `v0.0.5` install instructions and tool count in the README. (#244)
 
 ## `v0.1.0` — 2026-10-07
 
