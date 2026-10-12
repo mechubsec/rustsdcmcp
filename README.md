@@ -31,7 +31,7 @@ I/O therefore protect the management plane rather than merely decorate it.
 
 ## Current status
 
-`rustsdcmcp` exposes **74 MCP tools** (v0.1.0 and `main`): 60 bounded read
+`rustsdcmcp` exposes **74 MCP tools** (v0.2.0 and `main`): 60 bounded read
 tools and 14 change-control tools. The surface
 covers the part of the SDC API that manages SRX devices and their policy; the
 rest of the product's API is deliberately out of scope.
@@ -78,12 +78,13 @@ Observed response shapes and the remaining endpoint questions are tracked in
 
 ## Download
 
-The current release, [`v0.1.0`](https://github.com/mechubsec/rustsdcmcp/releases/tag/v0.1.0),
-has no downloadable tarball asset yet — build from approved source below until
-one is attached.
+The current release, [`v0.2.0`](https://github.com/mechubsec/rustsdcmcp/releases/tag/v0.2.0),
+attaches a checksummed, cosign-signed LXC install tarball
+(`rustsdcmcp_0.2.0_amd64.tar.gz`) as a release asset. Download and verify it,
+or build from approved source below.
 
 A `linux/amd64` container image is published for that tag to
-`ghcr.io/mechubsec/rustsdcmcp:0.1.0` and is publicly pullable with no
+`ghcr.io/mechubsec/rustsdcmcp:0.2.0` and is publicly pullable with no
 authentication.
 
 ## Build from approved source
@@ -94,7 +95,7 @@ intend to ship before building, testing, or packaging — the release tag is the
 usual choice:
 
 ```console
-approved_commit=$(git rev-parse v0.1.0^{commit})
+approved_commit=$(git rev-parse v0.2.0^{commit})
 git checkout --detach "$approved_commit"
 test "$(git rev-parse HEAD)" = "$approved_commit"
 cargo build --release --locked
@@ -136,13 +137,13 @@ Prerequisites:
   `api.sdcloud.juniperclouds.net`.
 - Root or equivalent operator access inside the LXC.
 
-`v0.1.0` has no release tarball asset yet, so build one from approved source
-(see [Build from approved source](#build-from-approved-source) above) and
-install the verified package:
+Download the signed `v0.2.0` release tarball (or build one from approved
+source — see [Build from approved source](#build-from-approved-source) above)
+and install the verified package:
 
 ```bash
 set -euo pipefail
-mapfile -t archives < <(find . -maxdepth 1 -type f -name 'rustsdcmcp_0.1.0.*_amd64.tar.gz' -print)
+mapfile -t archives < <(find . -maxdepth 1 -type f -name 'rustsdcmcp_0.2.0_amd64.tar.gz' -print)
 test "${#archives[@]}" -eq 1
 archive="${archives[0]}"
 sha256sum -c "$archive.sha256"
