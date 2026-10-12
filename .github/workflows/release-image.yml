@@ -61,6 +61,7 @@ jobs:
   tag-version:
     name: Resolve tag version
     runs-on: ubuntu-24.04
+    permissions: {}
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
