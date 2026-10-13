@@ -3713,7 +3713,7 @@ mod tests {
             (Update, Some(".."), None, json!({"name": "r"})),
             (Update, Some("."), None, json!({"name": "r"})),
         ];
-        for (action, rule_uuid, position, body) in cases {
+        for (case, (action, rule_uuid, position, body)) in cases.into_iter().enumerate() {
             let result = manager
                 .prepare_firewall_rule_write(
                     "alice".to_owned(),
@@ -3724,10 +3724,7 @@ mod tests {
                     &cancellation,
                 )
                 .await;
-            assert!(
-                result.is_err(),
-                "{action:?} {rule_uuid:?} {position:?} {body}"
-            );
+            assert!(result.is_err(), "case {case} was accepted");
         }
         assert!(
             seen.lock().expect("log").is_empty(),
