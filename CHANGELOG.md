@@ -16,6 +16,8 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 - Change-controlled firewall policy rule writes (create, update, delete),
   through the same plan, approval, and drift-checked apply flow as the other
   policy writes. (#226)
+- Change-controlled firewall rule ordering and rule-group creation, bound to
+  the observed ordering and refused if it changed before apply. (#229, #230)
 
 ## `v0.2.0` — 2026-10-11
 

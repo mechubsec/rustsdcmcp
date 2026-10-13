@@ -406,6 +406,60 @@ impl SdcClient {
             .await
     }
 
+    /// Fetch the rule and rule-group ordering of one firewall policy scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an identifier or the scope is invalid, or when
+    /// the SDC request fails.
+    pub async fn get_firewall_layout(
+        &self,
+        policy_uuid: &str,
+        scope: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SdcError> {
+        let segments = firewall_scope_segments(policy_uuid, scope, "heirarchy")?;
+        self.get(&segments, &[], cancellation).await
+    }
+
+    /// Move firewall policy rules within one scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an identifier, the scope, or the body is
+    /// invalid, or when the SDC request fails.
+    pub async fn move_firewall_rules(
+        &self,
+        policy_uuid: &str,
+        scope: &str,
+        body: &Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SdcError> {
+        let segments = firewall_scope_segments(policy_uuid, scope, "move_rules")?;
+        validate_object_body(body)?;
+        self.send_write(Method::POST, &segments, Some(body), cancellation)
+            .await
+    }
+
+    /// Create a firewall policy rule group.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an identifier, the scope, or the body is
+    /// invalid, or when the SDC request fails.
+    pub async fn create_firewall_rule_group(
+        &self,
+        policy_uuid: &str,
+        scope: &str,
+        body: &Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SdcError> {
+        let segments = firewall_scope_segments(policy_uuid, scope, "rule_groups")?;
+        validate_object_body(body)?;
+        self.send_write(Method::POST, &segments, Some(body), cancellation)
+            .await
+    }
+
     /// Fetch the operational state of a firewall policy by UUID.
     ///
     /// Returns policy deployment state and optionally per-device states when
@@ -2593,6 +2647,27 @@ fn firewall_rule_segments<'a>(
         segments.push(rule_uuid);
     }
     Ok(segments)
+}
+
+/// Path segments for a collection directly under a firewall policy scope.
+fn firewall_scope_segments<'a>(
+    policy_uuid: &'a str,
+    scope: &'a str,
+    collection: &'a str,
+) -> Result<Vec<&'a str>, SdcError> {
+    validate_atom("policy_uuid", policy_uuid)?;
+    if !matches!(scope, "zone" | "global") {
+        return Err(SdcError::InvalidIdentifier { field: "scope" });
+    }
+    Ok(vec![
+        "api",
+        "v1",
+        "policies",
+        "firewall",
+        policy_uuid,
+        scope,
+        collection,
+    ])
 }
 
 fn validate_atom(field: &'static str, value: &str) -> Result<(), SdcError> {

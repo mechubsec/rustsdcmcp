@@ -1544,6 +1544,231 @@ impl ChangeManager {
         })
     }
 
+    /// Observe a firewall scope's ordering and create a digest-bound plan for
+    /// moving rules or creating a rule group.
+    ///
+    /// The plan records the scope's current rule and group ordering, so apply
+    /// refuses if that ordering changed in the meantime.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the arguments do not fit the action, the scope
+    /// cannot be read, the envelope is invalid, or change-control state cannot
+    /// be written.
+    pub async fn prepare_firewall_layout_write(
+        &self,
+        owner: String,
+        request: crate::FirewallLayoutRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<crate::FirewallRuleLayoutPrepareResult, SdcError> {
+        let before = self
+            .client
+            .get_firewall_layout(&request.policy_uuid, request.scope.as_str(), cancellation)
+            .await?;
+        let crate::FirewallLayoutRequest {
+            policy_uuid,
+            scope,
+            change,
+        } = request;
+        let prepared = match change {
+            crate::FirewallLayoutChange::MoveRules {
+                rule_uuids,
+                target_group_uuid,
+                position,
+            } => crate::SdcPreparedFirewallRuleLayout::move_rules(
+                policy_uuid,
+                scope,
+                rule_uuids,
+                target_group_uuid,
+                position,
+                before,
+            )?,
+            crate::FirewallLayoutChange::CreateGroup {
+                name,
+                description,
+                position,
+            } => crate::SdcPreparedFirewallRuleLayout::create_group(
+                policy_uuid,
+                scope,
+                name,
+                description,
+                position,
+                before,
+            )?,
+        };
+        let change_set = self
+            .coordinator
+            .create_change_set(
+                self.tenant.clone(),
+                vec![prepared.clone()],
+                owner.clone(),
+                prepared.plan_digest().to_owned(),
+                self.firewall_rule_signature.clone(),
+                None,
+            )
+            .await
+            .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
+        let change_set = self
+            .waive_if_lab_mode(change_set, &owner, ChangeKind::FirewallRuleWrite)
+            .await?;
+        Ok(crate::FirewallRuleLayoutPrepareResult {
+            change_set,
+            prepared_change: prepared,
+        })
+    }
+
+    /// Discard a layout write that failed before anything was sent to SDC.
+    async fn release_unwritten_firewall_layout(
+        &self,
+        operation_id: &str,
+        owner: &str,
+        expected_plan_digest: &str,
+        transaction: &crate::SdcFirewallRuleLayoutTransaction,
+        cancellation: &CancellationToken,
+    ) -> String {
+        match self
+            .coordinator
+            .discard_operation(
+                operation_id,
+                &self.tenant,
+                owner,
+                expected_plan_digest,
+                transaction,
+                cancellation,
+            )
+            .await
+        {
+            Ok(_) => "the planned firewall rule layout write was discarded".to_owned(),
+            Err(discard_error) => format!(
+                "the planned firewall rule layout write also could not be discarded and needs manual resolution: {discard_error}"
+            ),
+        }
+    }
+
+    /// Apply, diff, drift-check, and commit one exact approved rule layout write.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when approval does not match, the scope ordering changed since
+    /// prepare, or the SDC write fails.
+    pub async fn apply_firewall_layout_write(
+        &self,
+        change_set_id: String,
+        owner: String,
+        expected_digest: String,
+        expected_plan_digest: String,
+        attribution: &Attribution,
+        cancellation: &CancellationToken,
+    ) -> Result<crate::FirewallRuleLayoutApplyResult, SdcError> {
+        let transaction = crate::SdcFirewallRuleLayoutTransaction::new(
+            self.client.clone(),
+            expected_plan_digest.clone(),
+            cancellation.clone(),
+        );
+        let applied = self
+            .coordinator
+            .apply_change_set(
+                change_set_id,
+                self.tenant.clone(),
+                self.endpoint.clone(),
+                owner.clone(),
+                expected_digest,
+                expected_plan_digest.clone(),
+                &transaction,
+                "firewall_rule_layout_write",
+                None,
+                None,
+                attribution,
+                cancellation,
+            )
+            .await
+            .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
+        let operation_id = applied.operation_id;
+        let staged = applied.staged;
+        let plan = self
+            .coordinator
+            .diff_operation(
+                &operation_id,
+                &self.tenant,
+                &owner,
+                &expected_plan_digest,
+                &transaction,
+                &staged,
+                cancellation,
+            )
+            .await
+            .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
+        let validation = match self
+            .coordinator
+            .validate_operation(
+                &operation_id,
+                &self.tenant,
+                &owner,
+                &expected_plan_digest,
+                &transaction,
+                &staged,
+                cancellation,
+            )
+            .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                // Staging and validation only read, so nothing was written and
+                // discarding the blocked record is truthful.
+                let detail = self
+                    .release_unwritten_firewall_layout(
+                        &operation_id,
+                        &owner,
+                        &expected_plan_digest,
+                        &transaction,
+                        cancellation,
+                    )
+                    .await;
+                return Err(SdcError::ChangeControl(format!("{error}; {detail}")));
+            }
+        };
+        let outcome = match self
+            .coordinator
+            .commit_operation(
+                &operation_id,
+                &self.tenant,
+                &owner,
+                &expected_plan_digest,
+                &self.firewall_rule_signature,
+                &transaction,
+                &staged,
+                attribution,
+                &CommitOptions::default(),
+                cancellation,
+            )
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // Only a refusal before anything was sent is safe to discard.
+                if !transaction.refused_before_write() {
+                    return Err(SdcError::ChangeControl(error.to_string()));
+                }
+                let detail = self
+                    .release_unwritten_firewall_layout(
+                        &operation_id,
+                        &owner,
+                        &expected_plan_digest,
+                        &transaction,
+                        cancellation,
+                    )
+                    .await;
+                return Err(SdcError::ChangeControl(format!("{error}; {detail}")));
+            }
+        };
+        Ok(crate::FirewallRuleLayoutApplyResult {
+            operation_id,
+            plan,
+            validation,
+            outcome,
+        })
+    }
+
     /// Resolve a NAT object's current state and create its digest-bound plan.
     ///
     /// Create carries no prior state; update and delete read the live object
@@ -3760,6 +3985,167 @@ mod tests {
             // = ten segments, so ten slashes: no identifier added or removed one.
             assert_eq!(path.matches('/').count(), 10, "{path}");
             assert!(!path.contains("/../"), "{path}");
+        }
+        server.abort();
+    }
+
+    fn move_request(
+        rules: &[&str],
+        group: Option<&str>,
+        position: u32,
+    ) -> crate::FirewallLayoutRequest {
+        crate::FirewallLayoutRequest {
+            policy_uuid: "policy-1".to_owned(),
+            scope: crate::FirewallRuleScope::Zone,
+            change: crate::FirewallLayoutChange::MoveRules {
+                rule_uuids: rules.iter().map(|r| (*r).to_owned()).collect(),
+                target_group_uuid: group.map(str::to_owned),
+                position,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn firewall_rule_move_sends_the_bound_order_and_refuses_reordering() {
+        let layout = Arc::new(std::sync::Mutex::new(
+            json!({"items": [{"uuid": "a", "position": 0}, {"uuid": "b", "position": 1}]}),
+        ));
+        let (base_url, server, seen) = rule_server(layout.clone()).await;
+        let (manager, _) = rule_manager(&base_url);
+        let cancellation = CancellationToken::new();
+
+        let prepared = manager
+            .prepare_firewall_layout_write(
+                "alice".to_owned(),
+                move_request(&["b", "a"], None, 0),
+                &cancellation,
+            )
+            .await
+            .expect("prepare");
+        let attribution = Attribution::stdio();
+        let apply = |prepared: &crate::FirewallRuleLayoutPrepareResult| {
+            manager.apply_firewall_layout_write(
+                prepared.change_set.change_set_id.clone(),
+                "alice".to_owned(),
+                prepared.change_set.digest.clone(),
+                prepared.prepared_change.plan_digest().to_owned(),
+                &attribution,
+                &cancellation,
+            )
+        };
+
+        // Someone reorders the scope after planning: apply must refuse.
+        *layout.lock().expect("layout") =
+            json!({"items": [{"uuid": "b", "position": 0}, {"uuid": "a", "position": 1}]});
+        let error = apply(&prepared).await.expect_err("drift must be refused");
+        assert!(error.to_string().contains("changed"), "{error}");
+        assert!(
+            seen.lock()
+                .expect("log")
+                .iter()
+                .all(|(method, _, _)| method == "GET"),
+            "a refused write must not issue a mutation"
+        );
+
+        // A fresh plan against the new ordering applies exactly the bound body.
+        let prepared = manager
+            .prepare_firewall_layout_write(
+                "alice".to_owned(),
+                move_request(&["a", "b"], Some("group-1"), 1),
+                &cancellation,
+            )
+            .await
+            .expect("prepare");
+        apply(&prepared).await.expect("apply");
+        let log = seen.lock().expect("log");
+        let write = log.last().expect("a write was sent");
+        assert_eq!(write.0, "POST");
+        assert_eq!(
+            write.1,
+            "/api/v1/policies/firewall/policy-1/zone/move_rules"
+        );
+        assert_eq!(
+            write.2,
+            json!({
+                "rule_uuids": ["a", "b"],
+                "target_rule_group_id": "group-1",
+                "position": 1,
+                "target_scope": "ZONE",
+            })
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn firewall_rule_group_create_is_drift_checked_and_posts_to_rule_groups() {
+        let layout = Arc::new(std::sync::Mutex::new(json!({"items": []})));
+        let (base_url, server, seen) = rule_server(layout.clone()).await;
+        let (manager, _) = rule_manager(&base_url);
+        let cancellation = CancellationToken::new();
+        let request = crate::FirewallLayoutRequest {
+            policy_uuid: "policy-1".to_owned(),
+            scope: crate::FirewallRuleScope::Global,
+            change: crate::FirewallLayoutChange::CreateGroup {
+                name: "web".to_owned(),
+                description: None,
+                position: Some(0),
+            },
+        };
+        let prepared = manager
+            .prepare_firewall_layout_write("alice".to_owned(), request, &cancellation)
+            .await
+            .expect("prepare");
+        manager
+            .apply_firewall_layout_write(
+                prepared.change_set.change_set_id.clone(),
+                "alice".to_owned(),
+                prepared.change_set.digest.clone(),
+                prepared.prepared_change.plan_digest().to_owned(),
+                &Attribution::stdio(),
+                &cancellation,
+            )
+            .await
+            .expect("apply");
+        let log = seen.lock().expect("log");
+        let write = log.last().expect("a write was sent");
+        assert_eq!(write.0, "POST");
+        assert_eq!(
+            write.1,
+            "/api/v1/policies/firewall/policy-1/global/rule_groups"
+        );
+        assert_eq!(write.2, json!({"name": "web", "position": 0}));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn firewall_layout_identifiers_cannot_escape_their_path_segment() {
+        let layout = Arc::new(std::sync::Mutex::new(json!({"items": []})));
+        let (base_url, server, seen) = rule_server(layout).await;
+        let (manager, _) = rule_manager(&base_url);
+        let cancellation = CancellationToken::new();
+        for (n, id) in ["..", ".", "a b", ""].into_iter().enumerate() {
+            let mut request = move_request(&["a"], None, 0);
+            request.policy_uuid = id.to_owned();
+            assert!(
+                manager
+                    .prepare_firewall_layout_write(format!("owner-{n}"), request, &cancellation)
+                    .await
+                    .is_err(),
+                "{id:?}"
+            );
+        }
+        // Encoded separators stay inside one segment.
+        for (n, id) in ["a/b", "a?b=c", "a#b"].into_iter().enumerate() {
+            let mut request = move_request(&["a"], None, 0);
+            request.policy_uuid = id.to_owned();
+            manager
+                .prepare_firewall_layout_write(format!("enc-{n}"), request, &cancellation)
+                .await
+                .expect("an encoded identifier stays one segment");
+        }
+        for (_, path, _) in seen.lock().expect("log").iter() {
+            // api, v1, policies, firewall, policy, scope, heirarchy
+            assert_eq!(path.matches('/').count(), 7, "{path}");
         }
         server.abort();
     }
