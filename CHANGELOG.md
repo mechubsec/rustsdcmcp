@@ -23,7 +23,7 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 
 - CLI validation failures now route through one shared exit helper with pinned
   refusal text. (#255)
-- Release workflows are pinned to mecmcp v0.28.1. (#253)
+- Release workflows reference the mecmcp v0.28.1 reusable workflows; the `mecmcp` library dependency pin remains v0.27.0. (#253)
 
 ## `v0.2.0` — 2026-10-11
 
