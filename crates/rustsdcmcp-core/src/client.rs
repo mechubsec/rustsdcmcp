@@ -24,6 +24,10 @@ use url::Url;
 
 /// Additional `GET` attempts allowed after a rate-limited or overloaded
 /// response, on top of the first attempt.
+/// Page size used to read a firewall scope's full rule ordering.
+const LAYOUT_PAGE_SIZE: u32 = 200;
+/// Most rules and groups one scope ordering may hold and still be bound to a change.
+const MAX_LAYOUT_ITEMS: usize = 10_000;
 const MAX_RETRY_ATTEMPTS: u32 = 3;
 
 /// Upper bound on any single retry delay, regardless of what SDC's
@@ -419,7 +423,44 @@ impl SdcClient {
         cancellation: &CancellationToken,
     ) -> Result<Value, SdcError> {
         let segments = firewall_scope_segments(policy_uuid, scope, "heirarchy")?;
-        self.get(&segments, &[], cancellation).await
+        let size = self.max_page_size.min(LAYOUT_PAGE_SIZE);
+        let mut items: Vec<Value> = Vec::new();
+        let count = loop {
+            let from = u64::try_from(items.len()).map_err(|_| SdcError::Serialization)?;
+            let page = ListRequest::new(from, size, self.max_page_size)?;
+            let query = page.query_pairs();
+            let borrowed = query
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect::<Vec<_>>();
+            let body: Value = self.get(&segments, &borrowed, cancellation).await?;
+            let (Some(page_items), Some(count)) = (
+                body.get("items").and_then(Value::as_array),
+                body.get("count").and_then(Value::as_u64),
+            ) else {
+                return Err(SdcError::InvalidInput(
+                    "firewall scope ordering response lacks an items list or numeric count",
+                ));
+            };
+            let short = page_items.len() < size as usize;
+            items.extend(page_items.iter().cloned());
+            if items.len() > MAX_LAYOUT_ITEMS {
+                return Err(SdcError::InvalidInput(
+                    "firewall scope is too large to bind an ordering to a change",
+                ));
+            }
+            if short {
+                break count;
+            }
+        };
+        // A short read must never be bound: the count SDC reports is a floor
+        // on what was returned (it may count rules only, not groups).
+        if (items.len() as u64) < count {
+            return Err(SdcError::InvalidInput(
+                "firewall scope ordering is incomplete; refusing to bind it to a change",
+            ));
+        }
+        Ok(serde_json::json!({ "items": items, "count": count }))
     }
 
     /// Move firewall policy rules within one scope.
@@ -2863,6 +2904,54 @@ mod tests {
             max_response_bytes,
             100,
         )
+    }
+
+    #[tokio::test]
+    async fn firewall_layout_reads_every_page_and_refuses_an_incomplete_ordering() {
+        let paged = |total: usize, ignore_from: bool| {
+            Router::new().route(
+                "/api/v1/policies/firewall/p/zone/heirarchy",
+                get(
+                    move |Query(query): Query<HashMap<String, String>>| async move {
+                        let from: usize = query["from"].parse().expect("from");
+                        let size: usize = query["size"].parse().expect("size");
+                        let from = if ignore_from { 0 } else { from };
+                        let items: Vec<_> = (from..total.min(from + size))
+                            .map(|n| serde_json::json!({"uuid": format!("r{n}")}))
+                            .collect();
+                        Json(serde_json::json!({"items": items, "count": total}))
+                    },
+                ),
+            )
+        };
+        let read = |app: Router| async move {
+            let (base_url, server) = serve(app).await;
+            let result = client(base_url, 1 << 20)
+                .get_firewall_layout("p", "zone", &CancellationToken::new())
+                .await;
+            server.abort();
+            result
+        };
+
+        let full = read(paged(450, false)).await.expect("complete ordering");
+        assert_eq!(full["items"].as_array().map(Vec::len), Some(450));
+        assert_eq!(full["items"][449]["uuid"], "r449");
+
+        // A server that ignores `from` can never be shown complete.
+        assert!(read(paged(450, true)).await.is_err());
+        assert!(read(paged(20_000, false)).await.is_err(), "over the cap");
+
+        // A count above what came back is a truncated read.
+        let short = Router::new().route(
+            "/api/v1/policies/firewall/p/zone/heirarchy",
+            get(|| async { Json(serde_json::json!({"items": [{"uuid": "a"}], "count": 2})) }),
+        );
+        assert!(read(short).await.is_err());
+        let no_count = Router::new().route(
+            "/api/v1/policies/firewall/p/zone/heirarchy",
+            get(|| async { Json(serde_json::json!({"items": []})) }),
+        );
+        assert!(read(no_count).await.is_err());
     }
 
     #[tokio::test]

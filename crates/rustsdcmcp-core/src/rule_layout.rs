@@ -300,9 +300,7 @@ impl SdcPreparedFirewallRuleLayout {
                 "prepared policy UUID must be 1-256 non-whitespace bytes".to_owned(),
             ));
         }
-        if !self.before.is_object() {
-            return Err(bad_shape(self.action));
-        }
+        let items = complete_items(&self.before).ok_or_else(|| bad_shape(self.action))?;
         match self.action {
             FirewallRuleLayoutOperation::MoveRules => {
                 let body: MoveBody = serde_json::from_value(self.request.clone())
@@ -318,6 +316,25 @@ impl SdcPreparedFirewallRuleLayout {
                 let _ = body.position;
                 if !ok {
                     return Err(bad_shape(self.action));
+                }
+                // Every moved rule and the target group must be in the scope
+                // the approver was shown; SDC is not trusted to refuse others.
+                let known = |uuid: &str, group: bool| {
+                    items.iter().any(|item| {
+                        item.get("uuid").and_then(Value::as_str) == Some(uuid)
+                            && is_group(item) == group
+                    })
+                };
+                if !body.rule_uuids.iter().all(|uuid| known(uuid, false))
+                    || !body
+                        .target_rule_group_id
+                        .as_deref()
+                        .is_none_or(|g| known(g, true))
+                {
+                    return Err(SdcError::PreparedChange(
+                        "moved rules and target group must exist in the observed scope ordering"
+                            .to_owned(),
+                    ));
                 }
             }
             FirewallRuleLayoutOperation::CreateGroup => {
@@ -360,6 +377,19 @@ impl SdcPreparedFirewallRuleLayout {
         }
         Ok(())
     }
+}
+
+/// The items of an observed ordering, only if it is demonstrably complete.
+fn complete_items(before: &Value) -> Option<&Vec<Value>> {
+    let items = before.get("items")?.as_array()?;
+    let count = before.get("count")?.as_u64()?;
+    (items.len() as u64 >= count).then_some(items)
+}
+
+fn is_group(item: &Value) -> bool {
+    item.get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind.to_ascii_lowercase().contains("group"))
 }
 
 fn plan_artifact(
@@ -590,7 +620,12 @@ mod tests {
     use super::*;
 
     fn layout(order: &[&str]) -> Value {
-        json!({"items": order.iter().map(|u| json!({"uuid": u})).collect::<Vec<_>>()})
+        let mut items: Vec<Value> = order
+            .iter()
+            .map(|u| json!({"uuid": u, "type": "rule"}))
+            .collect();
+        items.push(json!({"uuid": "g", "type": "group"}));
+        json!({"items": items, "count": items.len()})
     }
 
     fn mv(rules: &[&str], group: Option<&str>, position: u32) -> SdcPreparedFirewallRuleLayout {
@@ -658,7 +693,7 @@ mod tests {
                 "request",
                 json!({"rule_uuids": ["b", "a"], "position": 0, "target_scope": "ZONE"}),
             ),
-            ("before", json!({"items": []})),
+            ("before", json!({"items": [], "count": 0})),
             ("plan_digest", json!("00")),
         ] {
             let mut raw = serde_json::to_value(&prepared).expect("serializes");
@@ -687,6 +722,13 @@ mod tests {
         assert!(build(vec![""], None).is_err(), "empty id");
         assert!(build(vec!["a"], Some("g\n")).is_err(), "control byte");
         assert!(build(vec!["a"], Some("g")).is_ok());
+        assert!(build(vec!["zz"], None).is_err(), "rule not in the scope");
+        assert!(build(vec!["g"], None).is_err(), "a group is not a rule");
+        assert!(
+            build(vec!["a"], Some("a")).is_err(),
+            "a rule is not a group"
+        );
+        assert!(build(vec!["a"], Some("nope")).is_err(), "unknown group");
 
         // A body shape the action does not allow is refused even if the
         // digest is recomputed to match.
@@ -751,6 +793,28 @@ mod tests {
             layout(&[]),
         );
         assert!(forged.is_err(), "move body under a create_group action");
+    }
+
+    #[test]
+    fn an_incomplete_or_malformed_ordering_is_refused() {
+        let build = |before: Value| {
+            SdcPreparedFirewallRuleLayout::create_group(
+                "policy-1".to_owned(),
+                FirewallRuleScope::Zone,
+                "web".to_owned(),
+                None,
+                None,
+                before,
+            )
+        };
+        assert!(build(json!({"items": [{"uuid": "a", "type": "rule"}], "count": 2})).is_err());
+        assert!(build(json!({"items": []})).is_err(), "missing count");
+        assert!(
+            build(json!({"items": [], "count": "0"})).is_err(),
+            "non-numeric count"
+        );
+        assert!(build(json!({"count": 0})).is_err(), "missing items");
+        assert!(build(json!({"items": [], "count": 0})).is_ok());
     }
 
     #[test]

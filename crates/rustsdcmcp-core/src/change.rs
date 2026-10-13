@@ -4002,11 +4002,22 @@ mod tests {
         }
     }
 
+    fn scope_layout(order: &[(&str, &str)]) -> Value {
+        let items: Vec<Value> = order
+            .iter()
+            .enumerate()
+            .map(|(position, (uuid, kind))| json!({"uuid": uuid, "type": kind, "position": position}))
+            .collect();
+        json!({"items": items, "count": items.len()})
+    }
+
     #[tokio::test]
     async fn firewall_rule_move_sends_the_bound_order_and_refuses_reordering() {
-        let layout = Arc::new(std::sync::Mutex::new(
-            json!({"items": [{"uuid": "a", "position": 0}, {"uuid": "b", "position": 1}]}),
-        ));
+        let layout = Arc::new(std::sync::Mutex::new(scope_layout(&[
+            ("a", "rule"),
+            ("b", "rule"),
+            ("group-1", "group"),
+        ])));
         let (base_url, server, seen) = rule_server(layout.clone()).await;
         let (manager, _) = rule_manager(&base_url);
         let cancellation = CancellationToken::new();
@@ -4033,7 +4044,7 @@ mod tests {
 
         // Someone reorders the scope after planning: apply must refuse.
         *layout.lock().expect("layout") =
-            json!({"items": [{"uuid": "b", "position": 0}, {"uuid": "a", "position": 1}]});
+            scope_layout(&[("b", "rule"), ("a", "rule"), ("group-1", "group")]);
         let error = apply(&prepared).await.expect_err("drift must be refused");
         assert!(error.to_string().contains("changed"), "{error}");
         assert!(
@@ -4075,7 +4086,7 @@ mod tests {
 
     #[tokio::test]
     async fn firewall_rule_group_create_is_drift_checked_and_posts_to_rule_groups() {
-        let layout = Arc::new(std::sync::Mutex::new(json!({"items": []})));
+        let layout = Arc::new(std::sync::Mutex::new(scope_layout(&[])));
         let (base_url, server, seen) = rule_server(layout.clone()).await;
         let (manager, _) = rule_manager(&base_url);
         let cancellation = CancellationToken::new();
@@ -4116,7 +4127,7 @@ mod tests {
 
     #[tokio::test]
     async fn firewall_layout_identifiers_cannot_escape_their_path_segment() {
-        let layout = Arc::new(std::sync::Mutex::new(json!({"items": []})));
+        let layout = Arc::new(std::sync::Mutex::new(scope_layout(&[("a", "rule")])));
         let (base_url, server, seen) = rule_server(layout).await;
         let (manager, _) = rule_manager(&base_url);
         let cancellation = CancellationToken::new();
