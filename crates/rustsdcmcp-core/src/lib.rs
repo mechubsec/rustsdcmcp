@@ -17,6 +17,7 @@ mod paging;
 mod prepared;
 mod projection;
 mod redact;
+mod rule_write;
 
 pub use catalog::{ResourceKind, WritableResource};
 pub use change::{
@@ -57,4 +58,9 @@ pub use projection::{
 };
 pub use redact::{
     REDACTED, apply_oob_drift, contains_redaction_marker, redact_rma_state, redact_secrets,
+};
+pub use rule_write::{
+    FirewallRuleApplyResult, FirewallRuleLocation, FirewallRulePrepareResult, FirewallRuleScope,
+    FirewallRuleValidationReport, FirewallRuleWriteOperation, SdcFirewallRuleTransaction,
+    SdcPreparedFirewallRuleWrite,
 };

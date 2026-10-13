@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 #[test]
 fn tool_registry_has_expected_unique_surface() {
-    // 60 reads / 14 writes. #32 added 6 license/certificate reads (PR #49) and
+    // 60 reads / 16 writes. The firewall rule-write pair (#226) added 2 writes. #32 added 6 license/certificate reads (PR #49) and
     // 2 license/certificate writes; #34 added device-group list and get; #63
     // added discard_sdc_operation, which must be a write tool so a wildcard
     // scope cannot reach it; #21 added list_sdc_config_versions (read) and the
@@ -17,7 +17,7 @@ fn tool_registry_has_expected_unique_surface() {
     // CLAUDE.md's IAM decision narrowly (see the decision log entry there);
     // it is a `SCOPED_READ_TOOLS` entry, excluded from wildcard tool grants
     // like a write tool, but not itself a write.
-    assert_eq!(KNOWN_TOOLS.len(), 74);
+    assert_eq!(KNOWN_TOOLS.len(), 76);
     assert_eq!(
         KNOWN_TOOLS.iter().copied().collect::<BTreeSet<_>>().len(),
         KNOWN_TOOLS.len()
@@ -27,6 +27,7 @@ fn tool_registry_has_expected_unique_surface() {
         BTreeSet::from([
             "apply_sdc_change_set",
             "apply_sdc_device_inventory_sync",
+            "apply_sdc_firewall_rule_write",
             "apply_sdc_firewall_write",
             "apply_sdc_license_write",
             "apply_sdc_nat_write",
@@ -34,6 +35,7 @@ fn tool_registry_has_expected_unique_surface() {
             "approve_sdc_change_set",
             "discard_sdc_operation",
             "prepare_sdc_device_inventory_sync",
+            "prepare_sdc_firewall_rule_write",
             "prepare_sdc_firewall_write",
             "prepare_sdc_license_write",
             "prepare_sdc_nat_write",
@@ -212,6 +214,7 @@ fn redacted_tools_call_finish_redacted() {
         // before-state, so their output is redacted too.
         "prepare_sdc_policy_deploy",
         "prepare_sdc_firewall_write",
+        "prepare_sdc_firewall_rule_write",
         "prepare_sdc_license_write",
         "prepare_sdc_device_inventory_sync",
         "prepare_sdc_object_write",
@@ -219,6 +222,7 @@ fn redacted_tools_call_finish_redacted() {
         "approve_sdc_change_set",
         "apply_sdc_change_set",
         "apply_sdc_firewall_write",
+        "apply_sdc_firewall_rule_write",
         "apply_sdc_license_write",
         "apply_sdc_device_inventory_sync",
         "apply_sdc_object_write",

@@ -9,6 +9,14 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
+## Unreleased
+
+### Added
+
+- Change-controlled firewall policy rule writes (create, update, delete),
+  through the same plan, approval, and drift-checked apply flow as the other
+  policy writes. (#226)
+
 ## `v0.2.0` — 2026-10-11
 
 ### Added

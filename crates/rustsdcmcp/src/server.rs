@@ -17,7 +17,8 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use rustsdcmcp_core::{
-    ChangeManager, DeviceConfigSection, ImageJob, ListPage, ListRequest, NatWriteOperation,
+    ChangeManager, DeviceConfigSection, FirewallRuleLocation, FirewallRuleScope,
+    FirewallRuleWriteOperation, ImageJob, ListPage, ListRequest, NatWriteOperation,
     ObjectWriteAction, PolicyOperation, ResourceKind, SdcClient, SdcError, WritableResource,
     apply_oob_drift, page_list, page_paired_lists, project_ca_certificates, project_license,
     project_licenses, project_local_certificates, project_users_and_roles, redact_rma_state,
@@ -100,6 +101,8 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "apply_sdc_nat_write",
     "prepare_sdc_firewall_write",
     "apply_sdc_firewall_write",
+    "prepare_sdc_firewall_rule_write",
+    "apply_sdc_firewall_rule_write",
     "prepare_sdc_license_write",
     "apply_sdc_license_write",
     "prepare_sdc_device_inventory_sync",
@@ -123,6 +126,8 @@ pub const WRITE_TOOLS: &[&str] = &[
     "apply_sdc_nat_write",
     "prepare_sdc_firewall_write",
     "apply_sdc_firewall_write",
+    "prepare_sdc_firewall_rule_write",
+    "apply_sdc_firewall_rule_write",
     "prepare_sdc_license_write",
     "apply_sdc_license_write",
     "prepare_sdc_device_inventory_sync",
@@ -159,6 +164,8 @@ pub const WILDCARD_EXCLUDED_TOOLS: &[&str] = &[
     "apply_sdc_nat_write",
     "prepare_sdc_firewall_write",
     "apply_sdc_firewall_write",
+    "prepare_sdc_firewall_rule_write",
+    "apply_sdc_firewall_rule_write",
     "prepare_sdc_license_write",
     "apply_sdc_license_write",
     "prepare_sdc_device_inventory_sync",
@@ -1168,6 +1175,49 @@ pub struct ChangeSetArgs {
     pub tenant: String,
     /// Change-set identifier.
     pub change_set_id: String,
+}
+
+/// Arguments for planning one firewall rule write.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PrepareFirewallRuleArgs {
+    /// Configured tenant alias.
+    pub tenant: String,
+    /// Which rule mutation to plan.
+    pub action: FirewallRuleWriteOperation,
+    /// Firewall policy UUID.
+    pub policy_uuid: String,
+    /// Rule scope: `zone` or `global`.
+    pub scope: FirewallRuleScope,
+    /// Rule group UUID, when the rule lives in (or is created in) a group.
+    #[serde(default)]
+    pub group_uuid: Option<String>,
+    /// Rule UUID. Required for update and delete, absent for create.
+    #[serde(default)]
+    pub rule_uuid: Option<String>,
+    /// Zero-based insert position for create (0 = top). Create only.
+    #[serde(default)]
+    pub position: Option<u32>,
+    /// Rule definition. Required for create and update, absent for delete.
+    #[serde(default)]
+    pub body: Option<Value>,
+}
+
+/// Arguments for applying one approved firewall rule write.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyFirewallRuleArgs {
+    /// Configured tenant alias.
+    pub tenant: String,
+    /// Change-set identifier.
+    pub change_set_id: String,
+    /// Exact approved plan digest.
+    pub expected_digest: String,
+    /// Exact plan digest returned by prepare.
+    pub expected_plan_digest: String,
+    /// Optional external ticket or change reference.
+    #[serde(default)]
+    pub change_ref: Option<String>,
 }
 
 /// Arguments for planning one NAT write.
@@ -3459,6 +3509,85 @@ impl SdcHandler {
     }
 
     #[tool(
+        name = "prepare_sdc_firewall_rule_write",
+        description = "Plan one firewall policy rule create, update, or delete and create a digest-bound change set. This does not write."
+    )]
+    async fn prepare_sdc_firewall_rule_write(
+        &self,
+        Parameters(args): Parameters<PrepareFirewallRuleArgs>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let caller = caller_from_extensions::<NoGrant>(&extensions);
+        let mut audit = audit_scope(
+            caller,
+            "prepare_sdc_firewall_rule_write",
+            "prepare",
+            vec![args.tenant.clone()],
+        );
+        if let Err(error) = self.authorize(caller, "prepare_sdc_firewall_rule_write", &args.tenant)
+        {
+            audit.deny("scope");
+            return Ok(tool_error(error));
+        }
+        Ok(finish_redacted(
+            audit,
+            self.changes
+                .prepare_firewall_rule_write(
+                    owner(caller),
+                    args.action,
+                    FirewallRuleLocation {
+                        policy_uuid: args.policy_uuid,
+                        scope: args.scope,
+                        group_uuid: args.group_uuid,
+                        rule_uuid: args.rule_uuid,
+                    },
+                    args.position,
+                    args.body.unwrap_or(Value::Null),
+                    &cancellation,
+                )
+                .await,
+        ))
+    }
+
+    #[tool(
+        name = "apply_sdc_firewall_rule_write",
+        description = "Apply only an independently approved SDC firewall rule write, refusing it if the rule changed since it was planned."
+    )]
+    async fn apply_sdc_firewall_rule_write(
+        &self,
+        Parameters(args): Parameters<ApplyFirewallRuleArgs>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let caller = caller_from_extensions::<NoGrant>(&extensions);
+        let mut audit = audit_scope(
+            caller,
+            "apply_sdc_firewall_rule_write",
+            "apply",
+            vec![args.tenant.clone()],
+        );
+        if let Err(error) = self.authorize(caller, "apply_sdc_firewall_rule_write", &args.tenant) {
+            audit.deny("scope");
+            return Ok(tool_error(error));
+        }
+        let attribution = attribution(caller, args.change_ref);
+        Ok(finish_redacted(
+            audit,
+            self.changes
+                .apply_firewall_rule_write(
+                    args.change_set_id,
+                    owner(caller),
+                    args.expected_digest,
+                    args.expected_plan_digest,
+                    &attribution,
+                    &cancellation,
+                )
+                .await,
+        ))
+    }
+
+    #[tool(
         name = "prepare_sdc_nat_write",
         description = "Plan one NAT policy, rule, or rule-group write and create a digest-bound change set. This does not write."
     )]
@@ -4048,6 +4177,33 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn firewall_rule_write_tools_require_authentication_and_scope() {
+        for tool in [
+            "prepare_sdc_firewall_rule_write",
+            "apply_sdc_firewall_rule_write",
+        ] {
+            assert!(
+                authorize_request(None, tool, "tenant-a", "tenant-a").is_err(),
+                "{tool} must require authentication"
+            );
+            let wildcard = caller(ScopeSet::Wildcard, ScopeSet::Wildcard);
+            assert!(
+                authorize_request(Some(&wildcard), tool, "tenant-a", "tenant-a").is_err(),
+                "a wildcard tool scope must not reach {tool}"
+            );
+            let named = caller(
+                ScopeSet::Allowlist(vec!["tenant-a".to_owned()]),
+                ScopeSet::Allowlist(vec![tool.to_owned()]),
+            );
+            assert!(authorize_request(Some(&named), tool, "tenant-a", "tenant-a").is_ok());
+            assert!(
+                authorize_request(Some(&named), tool, "tenant-b", "tenant-a").is_err(),
+                "{tool} must stay inside the token's tenant"
+            );
+        }
     }
 
     #[test]

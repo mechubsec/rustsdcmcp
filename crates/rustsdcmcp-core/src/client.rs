@@ -328,6 +328,84 @@ impl SdcClient {
         .await
     }
 
+    /// Fetch one firewall policy rule, directly or inside a rule group.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an identifier or the scope is invalid, or when
+    /// the SDC request fails.
+    pub async fn get_firewall_rule_at(
+        &self,
+        policy_uuid: &str,
+        scope: &str,
+        group_uuid: Option<&str>,
+        rule_uuid: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SdcError> {
+        let segments = firewall_rule_segments(policy_uuid, scope, group_uuid, Some(rule_uuid))?;
+        self.get(&segments, &[], cancellation).await
+    }
+
+    /// Create a firewall policy rule, directly or inside a rule group.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an identifier, the scope, or the body is
+    /// invalid, or when the SDC request fails.
+    pub async fn create_firewall_rule(
+        &self,
+        policy_uuid: &str,
+        scope: &str,
+        group_uuid: Option<&str>,
+        body: &Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SdcError> {
+        let segments = firewall_rule_segments(policy_uuid, scope, group_uuid, None)?;
+        validate_object_body(body)?;
+        self.send_write(Method::POST, &segments, Some(body), cancellation)
+            .await
+    }
+
+    /// Replace a firewall policy rule, directly or inside a rule group.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an identifier, the scope, or the body is
+    /// invalid, or when the SDC request fails.
+    pub async fn update_firewall_rule(
+        &self,
+        policy_uuid: &str,
+        scope: &str,
+        group_uuid: Option<&str>,
+        rule_uuid: &str,
+        body: &Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SdcError> {
+        let segments = firewall_rule_segments(policy_uuid, scope, group_uuid, Some(rule_uuid))?;
+        validate_object_body(body)?;
+        self.send_write(Method::PUT, &segments, Some(body), cancellation)
+            .await
+    }
+
+    /// Delete a firewall policy rule, directly or inside a rule group.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an identifier or the scope is invalid, or when
+    /// the SDC request fails.
+    pub async fn delete_firewall_rule(
+        &self,
+        policy_uuid: &str,
+        scope: &str,
+        group_uuid: Option<&str>,
+        rule_uuid: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SdcError> {
+        let segments = firewall_rule_segments(policy_uuid, scope, group_uuid, Some(rule_uuid))?;
+        self.send_write(Method::DELETE, &segments, None, cancellation)
+            .await
+    }
+
     /// Fetch the operational state of a firewall policy by UUID.
     ///
     /// Returns policy deployment state and optionally per-device states when
@@ -2489,6 +2567,32 @@ fn validate_object_body(body: &Value) -> Result<(), SdcError> {
         ));
     }
     Ok(())
+}
+
+/// Path segments for a firewall rule, directly under the policy scope or
+/// inside one of its rule groups. Every identifier is validated, and the scope
+/// is restricted to the two values the API defines.
+fn firewall_rule_segments<'a>(
+    policy_uuid: &'a str,
+    scope: &'a str,
+    group_uuid: Option<&'a str>,
+    rule_uuid: Option<&'a str>,
+) -> Result<Vec<&'a str>, SdcError> {
+    validate_atom("policy_uuid", policy_uuid)?;
+    if !matches!(scope, "zone" | "global") {
+        return Err(SdcError::InvalidIdentifier { field: "scope" });
+    }
+    let mut segments = vec!["api", "v1", "policies", "firewall", policy_uuid, scope];
+    if let Some(group_uuid) = group_uuid {
+        validate_atom("group_uuid", group_uuid)?;
+        segments.extend(["rule_groups", group_uuid]);
+    }
+    segments.push("rules");
+    if let Some(rule_uuid) = rule_uuid {
+        validate_atom("rule_uuid", rule_uuid)?;
+        segments.push(rule_uuid);
+    }
+    Ok(segments)
 }
 
 fn validate_atom(field: &'static str, value: &str) -> Result<(), SdcError> {
