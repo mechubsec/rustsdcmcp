@@ -34,6 +34,8 @@ mecmcp-server.workspace = true
 mecmcp-transport.workspace = true
 
 [dev-dependencies]
+# Shared refusal fixtures; test-only, never in the normal dependency graph.
+mecmcp-runtime = { workspace = true, features = ["test-util"] }
 reqwest.workspace = true
 tempfile = "3"
 syn = { version = "3", features = ["full"] }
