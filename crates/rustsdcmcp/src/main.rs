@@ -763,7 +763,7 @@ async fn main() -> Result<()> {
         max_requests_per_second_per_token,
         max_request_burst_per_token,
     } = parsed.cli;
-    mecmcp_runtime::cli_validate::validate(&args).map_err(|error| anyhow::anyhow!("{error}"))?;
+    mecmcp_runtime::cli_validate::validate_or_exit(&args);
 
     // Decide the listener's authentication boundary alongside the rest of the
     // CLI refusals, before anything reads a credential or contacts SDC. Only
