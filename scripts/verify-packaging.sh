@@ -433,7 +433,7 @@ assert_builder_preserves_unsafe_output_entries() {
     # the symlink/unexpected-entry checks it exists to cover.
     cat >"$fixture/Cargo.toml" <<'EOF'
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 EOF
     git -C "$fixture" init -q
     git -C "$fixture" config user.email packaging-test@example.invalid
@@ -441,7 +441,7 @@ EOF
     git -C "$fixture" add .gitignore scripts/build-package.sh Cargo.toml
     git -C "$fixture" commit -qm 'test fixture'
     commit=$(git -C "$fixture" rev-parse HEAD)
-    archive="$fixture/dist/$commit/rustsdcmcp_0.2.0.$(date -u -d "@$(git -C "$fixture" show -s --format=%ct HEAD)" +%Y%m%d).${commit:0:12}_amd64.tar.gz"
+    archive="$fixture/dist/$commit/rustsdcmcp_0.3.0.$(date -u -d "@$(git -C "$fixture" show -s --format=%ct HEAD)" +%Y%m%d).${commit:0:12}_amd64.tar.gz"
     checksum="${archive}.sha256"
     cat >"$fake_bin/trivy" <<'EOF'
 #!/usr/bin/env bash
@@ -493,7 +493,7 @@ systemd-analyze --root="$verification_root" verify /etc/systemd/system/rustsdcmc
 
 git_commit=$(git rev-parse HEAD)
 package_date=$(date -u -d "@$(git show -s --format=%ct HEAD)" +%Y%m%d)
-archive="dist/$git_commit/rustsdcmcp_0.2.0.${package_date}.${git_commit:0:12}_amd64.tar.gz"
+archive="dist/$git_commit/rustsdcmcp_0.3.0.${package_date}.${git_commit:0:12}_amd64.tar.gz"
 if [[ -f "$archive" ]]; then
     packaging/tests/package-smoke.sh "$archive"
 fi

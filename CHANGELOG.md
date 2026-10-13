@@ -9,7 +9,7 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
-## Unreleased
+## `v0.3.0` — 2026-10-13
 
 ### Added
 
@@ -18,6 +18,12 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
   policy writes. (#226)
 - Change-controlled firewall rule ordering and rule-group creation, bound to
   the observed ordering and refused if it changed before apply. (#229, #230)
+
+### Changed
+
+- CLI validation failures now route through one shared exit helper with pinned
+  refusal text. (#255)
+- Release workflows are pinned to mecmcp v0.28.1. (#253)
 
 ## `v0.2.0` — 2026-10-11
 
