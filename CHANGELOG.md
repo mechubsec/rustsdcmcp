@@ -9,18 +9,49 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
-## Unreleased
+## `v0.3.0` — 2026-10-13
+
+### Added
+
+- Change-controlled firewall policy rule writes (create, update, delete),
+  through the same plan, approval, and drift-checked apply flow as the other
+  policy writes. (#226)
+- Change-controlled firewall rule ordering and rule-group creation, bound to
+  the observed ordering and refused if it changed before apply. (#229, #230)
+
+### Changed
+
+- CLI validation failures now route through one shared exit helper with pinned
+  refusal text. (#255)
+- Release workflows reference the mecmcp v0.28.1 reusable workflows; the `mecmcp` library dependency pin remains v0.27.0. (#253)
+
+## `v0.2.0` — 2026-10-11
 
 ### Added
 
 - Official MCP Registry metadata: `server.json` for the stdio container
-  invocation, and the `io.modelcontextprotocol.server.name` image label.
+  invocation, and the `io.modelcontextprotocol.server.name` image label. (#234)
+- Published releases now attach a checksummed, cosign-signed LXC install
+  tarball. (#239)
+- Release images are dual-pushed to GHCR and Docker Hub
+  (`docker.io/mechub/rustsdcmcp`). (#243)
 
 ### Fixed
 - Device drift advisories no longer treat a missing upstream report as an in-sync result. (#228)
+- Hardens startup and reload signal handling. (#231)
+- Hardens startup credential file checks and error reporting. (#242)
+- Hardens the LXC installer's file handling. (#237)
+- Hardens redaction of preview and deploy output. (#247)
 
 ### Changed
 - The policy-deploy preview notes that drift detection relies on the upstream report.
+- Bumped the `mecmcp` dependency pin to v0.27.0 and adopted its updated
+  change-set API. (#250)
+- Hardened a gitleaks allowlist entry for a synthetic test fixture to match
+  by content instead of commit SHA, so it stays valid across future edits. (#248)
+
+### Documentation
+- Fixed stale `v0.0.5` install instructions and tool count in the README. (#244)
 
 ## `v0.1.0` — 2026-10-07
 

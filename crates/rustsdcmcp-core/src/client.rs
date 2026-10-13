@@ -24,6 +24,10 @@ use url::Url;
 
 /// Additional `GET` attempts allowed after a rate-limited or overloaded
 /// response, on top of the first attempt.
+/// Page size used to read a firewall scope's full rule ordering.
+const LAYOUT_PAGE_SIZE: u32 = 200;
+/// Most rules and groups one scope ordering may hold and still be bound to a change.
+const MAX_LAYOUT_ITEMS: usize = 10_000;
 const MAX_RETRY_ATTEMPTS: u32 = 3;
 
 /// Upper bound on any single retry delay, regardless of what SDC's
@@ -326,6 +330,175 @@ impl SdcClient {
             cancellation,
         )
         .await
+    }
+
+    /// Fetch one firewall policy rule, directly or inside a rule group.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an identifier or the scope is invalid, or when
+    /// the SDC request fails.
+    pub async fn get_firewall_rule_at(
+        &self,
+        policy_uuid: &str,
+        scope: &str,
+        group_uuid: Option<&str>,
+        rule_uuid: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SdcError> {
+        let segments = firewall_rule_segments(policy_uuid, scope, group_uuid, Some(rule_uuid))?;
+        self.get(&segments, &[], cancellation).await
+    }
+
+    /// Create a firewall policy rule, directly or inside a rule group.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an identifier, the scope, or the body is
+    /// invalid, or when the SDC request fails.
+    pub async fn create_firewall_rule(
+        &self,
+        policy_uuid: &str,
+        scope: &str,
+        group_uuid: Option<&str>,
+        body: &Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SdcError> {
+        let segments = firewall_rule_segments(policy_uuid, scope, group_uuid, None)?;
+        validate_object_body(body)?;
+        self.send_write(Method::POST, &segments, Some(body), cancellation)
+            .await
+    }
+
+    /// Replace a firewall policy rule, directly or inside a rule group.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an identifier, the scope, or the body is
+    /// invalid, or when the SDC request fails.
+    pub async fn update_firewall_rule(
+        &self,
+        policy_uuid: &str,
+        scope: &str,
+        group_uuid: Option<&str>,
+        rule_uuid: &str,
+        body: &Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SdcError> {
+        let segments = firewall_rule_segments(policy_uuid, scope, group_uuid, Some(rule_uuid))?;
+        validate_object_body(body)?;
+        self.send_write(Method::PUT, &segments, Some(body), cancellation)
+            .await
+    }
+
+    /// Delete a firewall policy rule, directly or inside a rule group.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an identifier or the scope is invalid, or when
+    /// the SDC request fails.
+    pub async fn delete_firewall_rule(
+        &self,
+        policy_uuid: &str,
+        scope: &str,
+        group_uuid: Option<&str>,
+        rule_uuid: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SdcError> {
+        let segments = firewall_rule_segments(policy_uuid, scope, group_uuid, Some(rule_uuid))?;
+        self.send_write(Method::DELETE, &segments, None, cancellation)
+            .await
+    }
+
+    /// Fetch the rule and rule-group ordering of one firewall policy scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an identifier or the scope is invalid, or when
+    /// the SDC request fails.
+    pub async fn get_firewall_layout(
+        &self,
+        policy_uuid: &str,
+        scope: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SdcError> {
+        let segments = firewall_scope_segments(policy_uuid, scope, "heirarchy")?;
+        let size = self.max_page_size.min(LAYOUT_PAGE_SIZE);
+        let mut items: Vec<Value> = Vec::new();
+        let count = loop {
+            let from = u64::try_from(items.len()).map_err(|_| SdcError::Serialization)?;
+            let page = ListRequest::new(from, size, self.max_page_size)?;
+            let query = page.query_pairs();
+            let borrowed = query
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect::<Vec<_>>();
+            let body: Value = self.get(&segments, &borrowed, cancellation).await?;
+            let (Some(page_items), Some(count)) = (
+                body.get("items").and_then(Value::as_array),
+                body.get("count").and_then(Value::as_u64),
+            ) else {
+                return Err(SdcError::InvalidInput(
+                    "firewall scope ordering response lacks an items list or numeric count",
+                ));
+            };
+            let short = page_items.len() < size as usize;
+            items.extend(page_items.iter().cloned());
+            if items.len() > MAX_LAYOUT_ITEMS {
+                return Err(SdcError::InvalidInput(
+                    "firewall scope is too large to bind an ordering to a change",
+                ));
+            }
+            if short {
+                break count;
+            }
+        };
+        // A short read must never be bound: the count SDC reports is a floor
+        // on what was returned (it may count rules only, not groups).
+        if (items.len() as u64) < count {
+            return Err(SdcError::InvalidInput(
+                "firewall scope ordering is incomplete; refusing to bind it to a change",
+            ));
+        }
+        Ok(serde_json::json!({ "items": items, "count": count }))
+    }
+
+    /// Move firewall policy rules within one scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an identifier, the scope, or the body is
+    /// invalid, or when the SDC request fails.
+    pub async fn move_firewall_rules(
+        &self,
+        policy_uuid: &str,
+        scope: &str,
+        body: &Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SdcError> {
+        let segments = firewall_scope_segments(policy_uuid, scope, "move_rules")?;
+        validate_object_body(body)?;
+        self.send_write(Method::POST, &segments, Some(body), cancellation)
+            .await
+    }
+
+    /// Create a firewall policy rule group.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an identifier, the scope, or the body is
+    /// invalid, or when the SDC request fails.
+    pub async fn create_firewall_rule_group(
+        &self,
+        policy_uuid: &str,
+        scope: &str,
+        body: &Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SdcError> {
+        let segments = firewall_scope_segments(policy_uuid, scope, "rule_groups")?;
+        validate_object_body(body)?;
+        self.send_write(Method::POST, &segments, Some(body), cancellation)
+            .await
     }
 
     /// Fetch the operational state of a firewall policy by UUID.
@@ -2491,6 +2664,53 @@ fn validate_object_body(body: &Value) -> Result<(), SdcError> {
     Ok(())
 }
 
+/// Path segments for a firewall rule, directly under the policy scope or
+/// inside one of its rule groups. Every identifier is validated, and the scope
+/// is restricted to the two values the API defines.
+fn firewall_rule_segments<'a>(
+    policy_uuid: &'a str,
+    scope: &'a str,
+    group_uuid: Option<&'a str>,
+    rule_uuid: Option<&'a str>,
+) -> Result<Vec<&'a str>, SdcError> {
+    validate_atom("policy_uuid", policy_uuid)?;
+    if !matches!(scope, "zone" | "global") {
+        return Err(SdcError::InvalidIdentifier { field: "scope" });
+    }
+    let mut segments = vec!["api", "v1", "policies", "firewall", policy_uuid, scope];
+    if let Some(group_uuid) = group_uuid {
+        validate_atom("group_uuid", group_uuid)?;
+        segments.extend(["rule_groups", group_uuid]);
+    }
+    segments.push("rules");
+    if let Some(rule_uuid) = rule_uuid {
+        validate_atom("rule_uuid", rule_uuid)?;
+        segments.push(rule_uuid);
+    }
+    Ok(segments)
+}
+
+/// Path segments for a collection directly under a firewall policy scope.
+fn firewall_scope_segments<'a>(
+    policy_uuid: &'a str,
+    scope: &'a str,
+    collection: &'a str,
+) -> Result<Vec<&'a str>, SdcError> {
+    validate_atom("policy_uuid", policy_uuid)?;
+    if !matches!(scope, "zone" | "global") {
+        return Err(SdcError::InvalidIdentifier { field: "scope" });
+    }
+    Ok(vec![
+        "api",
+        "v1",
+        "policies",
+        "firewall",
+        policy_uuid,
+        scope,
+        collection,
+    ])
+}
+
 fn validate_atom(field: &'static str, value: &str) -> Result<(), SdcError> {
     if value.is_empty()
         || value.len() > 256
@@ -2684,6 +2904,54 @@ mod tests {
             max_response_bytes,
             100,
         )
+    }
+
+    #[tokio::test]
+    async fn firewall_layout_reads_every_page_and_refuses_an_incomplete_ordering() {
+        let paged = |total: usize, ignore_from: bool| {
+            Router::new().route(
+                "/api/v1/policies/firewall/p/zone/heirarchy",
+                get(
+                    move |Query(query): Query<HashMap<String, String>>| async move {
+                        let from: usize = query["from"].parse().expect("from");
+                        let size: usize = query["size"].parse().expect("size");
+                        let from = if ignore_from { 0 } else { from };
+                        let items: Vec<_> = (from..total.min(from + size))
+                            .map(|n| serde_json::json!({"uuid": format!("r{n}")}))
+                            .collect();
+                        Json(serde_json::json!({"items": items, "count": total}))
+                    },
+                ),
+            )
+        };
+        let read = |app: Router| async move {
+            let (base_url, server) = serve(app).await;
+            let result = client(base_url, 1 << 20)
+                .get_firewall_layout("p", "zone", &CancellationToken::new())
+                .await;
+            server.abort();
+            result
+        };
+
+        let full = read(paged(450, false)).await.expect("complete ordering");
+        assert_eq!(full["items"].as_array().map(Vec::len), Some(450));
+        assert_eq!(full["items"][449]["uuid"], "r449");
+
+        // A server that ignores `from` can never be shown complete.
+        assert!(read(paged(450, true)).await.is_err());
+        assert!(read(paged(20_000, false)).await.is_err(), "over the cap");
+
+        // A count above what came back is a truncated read.
+        let short = Router::new().route(
+            "/api/v1/policies/firewall/p/zone/heirarchy",
+            get(|| async { Json(serde_json::json!({"items": [{"uuid": "a"}], "count": 2})) }),
+        );
+        assert!(read(short).await.is_err());
+        let no_count = Router::new().route(
+            "/api/v1/policies/firewall/p/zone/heirarchy",
+            get(|| async { Json(serde_json::json!({"items": []})) }),
+        );
+        assert!(read(no_count).await.is_err());
     }
 
     #[tokio::test]
