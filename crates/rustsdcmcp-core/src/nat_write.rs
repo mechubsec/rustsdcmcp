@@ -500,7 +500,14 @@ impl DeviceTransaction for SdcNatTransaction {
                         .to_owned(),
                 })
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                // A definitive validation rejection means nothing landed, so the
+                // operation is safe to discard instead of wedging later applies.
+                if error.is_definitive_rejection() {
+                    self.refused_before_write.store(true, Ordering::SeqCst);
+                }
+                Err(error)
+            }
         }
     }
 
