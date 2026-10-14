@@ -2868,6 +2868,20 @@ pub enum SdcError {
     TargetDrifted,
 }
 
+impl SdcError {
+    /// Whether SDC definitively refused a write as invalid, so nothing landed.
+    #[must_use]
+    pub const fn is_definitive_rejection(&self) -> bool {
+        matches!(
+            self,
+            Self::Api {
+                status: 400 | 422,
+                ..
+            }
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

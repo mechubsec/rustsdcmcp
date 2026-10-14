@@ -3101,6 +3101,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_validation_rejection_from_sdc_leaves_the_write_discardable() {
+        // SDC answering 400 means nothing landed; the failed record must be
+        // discardable so it cannot block later change sets.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let app = Router::new().route(
+            "/api/v1/policies/firewall",
+            post(|| async {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(
+                        json!({"code": "invalid", "message": "position must be greater than zero"}),
+                    ),
+                )
+            }),
+        );
+        let (base_url, server) = serve(app).await;
+        let client =
+            SdcClient::from_test_parts(base_url.as_str(), "test-secret".to_owned(), 64 * 1024, 100);
+        let prepared = crate::SdcPreparedFirewallWrite::new(
+            crate::FirewallWriteOperation::CreatePolicy,
+            None,
+            json!({"name": "p", "order": 1}),
+            Value::Null,
+        )
+        .expect("prepared");
+        let transaction = crate::SdcFirewallTransaction::new(
+            client,
+            prepared.plan_digest().to_owned(),
+            CancellationToken::new(),
+        );
+        transaction
+            .commit(
+                &prepared,
+                &Attribution::stdio(),
+                &mecmcp_changeset::CommitOptions::default(),
+            )
+            .await
+            .expect_err("a 400 must fail the commit");
+        assert!(
+            transaction.refused_before_write(),
+            "a definitive rejection must be discardable"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn a_failed_pre_write_recheck_is_still_discardable() {
         // The recheck read itself can fail -- another actor deletes the target,
         // or the read errors transiently. Nothing was sent, so that must remain
