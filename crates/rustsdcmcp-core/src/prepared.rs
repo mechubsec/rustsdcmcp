@@ -209,3 +209,70 @@ pub enum PreparedError {
     #[error("prepared change exceeds the 8388608-byte limit")]
     TooLarge,
 }
+
+/// Whether a free-text description looks like markup or an HTML entity.
+///
+/// SDC answers such descriptions with an opaque 5xx or 403 at apply, which
+/// leaves the device operation failed and holding the lock. Refusing them at
+/// prepare gives a clear error instead. A lone `<` or `>` and the empty `<>`
+/// are accepted by SDC and stay accepted here.
+pub(crate) fn description_looks_like_markup(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let tag_like = bytes.iter().enumerate().any(|(start, byte)| {
+        *byte == b'<'
+            && bytes[start + 1..]
+                .iter()
+                .position(|b| *b == b'>')
+                .is_some_and(|len| len > 0)
+    });
+    let entity_like = bytes.iter().enumerate().any(|(start, byte)| {
+        *byte == b'&' && {
+            let rest = &bytes[start + 1..];
+            let len = rest
+                .iter()
+                .take_while(|b| b.is_ascii_alphanumeric() || **b == b'#')
+                .count();
+            len > 0 && rest.get(len) == Some(&b';')
+        }
+    });
+    tag_like || entity_like
+}
+
+#[cfg(test)]
+mod description_tests {
+    use super::description_looks_like_markup as bad;
+
+    #[test]
+    fn markup_and_entities_are_flagged() {
+        for text in [
+            "<b>x</b>",
+            "a<b>c",
+            "<b>",
+            "</b>",
+            "x<y>",
+            "&lt;b&gt;",
+            "&#60;",
+            "<script>alert(1)</script>",
+        ] {
+            assert!(bad(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn accepted_punctuation_is_not_flagged() {
+        for text in [
+            "",
+            "plain",
+            "a<b",
+            "a>b",
+            "<>",
+            "a < b",
+            "a&b",
+            "a & b;",
+            "caf\u{e9} \u{2014} ok",
+            "a(b)#@'\"/;:,.-_",
+        ] {
+            assert!(!bad(text), "{text}");
+        }
+    }
+}
