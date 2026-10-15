@@ -212,19 +212,28 @@ pub enum PreparedError {
 
 /// Whether a free-text description looks like markup or an HTML entity.
 ///
-/// SDC answers such descriptions with an opaque 5xx or 403 at apply, which
-/// leaves the device operation failed and holding the lock. Refusing them at
-/// prepare gives a clear error instead. A lone `<` or `>` and the empty `<>`
+/// SDC rejects such descriptions at apply with an opaque error; refuse them at
+/// prepare with a clear one. A lone `<` or `>` and the empty `<>`
 /// are accepted by SDC and stay accepted here.
 pub(crate) fn description_looks_like_markup(text: &str) -> bool {
     let bytes = text.as_bytes();
-    let tag_like = bytes.iter().enumerate().any(|(start, byte)| {
-        *byte == b'<'
-            && bytes[start + 1..]
-                .iter()
-                .position(|b| *b == b'>')
-                .is_some_and(|len| len > 0)
-    });
+    let mut open: Option<usize> = None;
+    let mut tag_like = false;
+    for (i, b) in bytes.iter().enumerate() {
+        match b {
+            b'<' => {
+                open.get_or_insert(i);
+            }
+            b'>' => {
+                if open.is_some_and(|o| i > o + 1) {
+                    tag_like = true;
+                    break;
+                }
+                open = None;
+            }
+            _ => {}
+        }
+    }
     let entity_like = bytes.iter().enumerate().any(|(start, byte)| {
         *byte == b'&' && {
             let rest = &bytes[start + 1..];
