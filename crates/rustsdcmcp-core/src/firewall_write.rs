@@ -174,6 +174,19 @@ impl SdcPreparedFirewallWrite {
                 self.action.as_str()
             )));
         }
+        // SDC requires `order` on policy create and counts from 1; discovering
+        // that as a 400 at apply would burn the change set.
+        if self.action == FirewallWriteOperation::CreatePolicy
+            && !self
+                .request
+                .get("order")
+                .and_then(Value::as_i64)
+                .is_some_and(|order| order >= 1)
+        {
+            return Err(SdcError::InvalidInput(
+                "firewall policy create requires an integer `order` of 1 or more",
+            ));
+        }
         if crate::redact::contains_redaction_marker(&self.request) {
             return Err(SdcError::InvalidInput(
                 "write body contains a redaction marker; re-read the field value out-of-band",
@@ -424,7 +437,14 @@ impl DeviceTransaction for SdcFirewallTransaction {
                         .to_owned(),
                 })
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                // A definitive validation rejection means nothing landed, so the
+                // operation is safe to discard instead of wedging later applies.
+                if error.is_definitive_rejection() {
+                    self.refused_before_write.store(true, Ordering::SeqCst);
+                }
+                Err(error)
+            }
         }
     }
 
@@ -497,10 +517,52 @@ mod tests {
         let error = SdcPreparedFirewallWrite::new(
             FirewallWriteOperation::CreatePolicy,
             None,
-            json!({"name": crate::REDACTED}),
+            json!({"name": crate::REDACTED, "order": 1}),
             Value::Null,
         )
         .expect_err("a redaction marker in the request body must be refused");
         assert!(matches!(error, SdcError::InvalidInput(_)), "{error:?}");
+    }
+
+    #[test]
+    fn policy_create_requires_a_positive_order() {
+        let build = |request: Value| {
+            SdcPreparedFirewallWrite::new(
+                FirewallWriteOperation::CreatePolicy,
+                None,
+                request,
+                Value::Null,
+            )
+        };
+        for bad in [
+            json!({"name": "p"}),
+            json!({"name": "p", "order": 0}),
+            json!({"name": "p", "order": -3}),
+            json!({"name": "p", "order": "1"}),
+            json!({"name": "p", "order": 1.5}),
+        ] {
+            let error = build(bad.clone()).expect_err("an invalid order must be refused");
+            assert!(
+                matches!(error, SdcError::InvalidInput(_)),
+                "{bad}: {error:?}"
+            );
+        }
+        build(json!({"name": "p", "order": 1})).expect("a positive order is accepted");
+    }
+
+    #[test]
+    fn only_validation_rejections_are_definitive() {
+        let api = |status| SdcError::Api {
+            status,
+            code: "c".to_owned(),
+            message: "m".to_owned(),
+        };
+        assert!(api(400).is_definitive_rejection());
+        assert!(api(422).is_definitive_rejection());
+        for status in [401, 403, 429, 500, 502, 503] {
+            assert!(!api(status).is_definitive_rejection(), "{status}");
+        }
+        assert!(!SdcError::Timeout.is_definitive_rejection());
+        assert!(!SdcError::MutationOutcomeUnknown.is_definitive_rejection());
     }
 }

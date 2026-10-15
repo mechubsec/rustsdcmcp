@@ -26,7 +26,7 @@ This is a Cargo workspace (`Cargo.toml`) with two members:
 - `crates/rustsdcmcp` — the MCP server binary (tool surface, transport, CLI)
 
 MSRV is `1.89` (`workspace.package.rust-version`); the pinned build toolchain
-is `1.98.0` (`rust-toolchain.toml`).
+is `1.99.0` (`rust-toolchain.toml`).
 
 ## Build and test
 
