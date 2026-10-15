@@ -9,6 +9,24 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
+## `v0.3.1` — 2026-10-15
+
+### Added
+
+- Releases are now published to the official MCP Registry
+  (`io.github.mechubsec/rustsdcmcp`) from the tag-triggered release workflow,
+  using GitHub OIDC. (#251)
+
+### Security
+
+- Hardens write preparation and releases rejected writes. (#261)
+- Bumps `rustls` to 0.23.46 for the published RustSec advisories. (#267)
+
+### Changed
+
+- Routine dependency updates (cargo, GitHub Actions, base image, mecmcp
+  packaging conformance action). (#262, #263, #264, #265)
+
 ## `v0.3.0` — 2026-10-13
 
 ### Added
