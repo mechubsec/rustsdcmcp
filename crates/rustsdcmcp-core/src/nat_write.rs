@@ -163,6 +163,26 @@ impl SdcPreparedNatWrite {
                 "write body contains a redaction marker; re-read the field value out-of-band",
             ));
         }
+        if matches!(
+            self.action,
+            NatWriteOperation::CreateRuleGroup | NatWriteOperation::UpdateRuleGroup
+        ) && let Some(description) = self.request.get("description").and_then(Value::as_str)
+        {
+            if description.len() > 2048
+                || description
+                    .chars()
+                    .any(|c| c.is_control() && c != '\n' && c != '\t')
+            {
+                return Err(SdcError::InvalidInput(
+                    "rule group description must be at most 2048 bytes without control characters",
+                ));
+            }
+            if crate::prepared::description_looks_like_markup(description) {
+                return Err(SdcError::InvalidInput(
+                    "rule group description must not contain markup or HTML entities",
+                ));
+            }
+        }
         if serde_json::to_vec(self)
             .map_err(|_| SdcError::Serialization)?
             .len()
@@ -557,5 +577,62 @@ mod tests {
         )
         .expect_err("a redaction marker in the request body must be refused");
         assert!(matches!(error, SdcError::InvalidInput(_)), "{error:?}");
+    }
+
+    #[test]
+    fn a_markup_like_group_description_is_refused_at_prepare() {
+        let build = |action, description: &str| {
+            SdcPreparedNatWrite::new(
+                action,
+                Some("p".to_owned()),
+                None,
+                Some("g".to_owned()),
+                json!({"name": "g", "description": description}),
+                Value::Null,
+            )
+        };
+        for action in [
+            NatWriteOperation::CreateRuleGroup,
+            NatWriteOperation::UpdateRuleGroup,
+        ] {
+            assert!(matches!(
+                build(action, "<b>x</b>"),
+                Err(SdcError::InvalidInput(_))
+            ));
+            assert!(matches!(
+                build(action, "&lt;b&gt;"),
+                Err(SdcError::InvalidInput(_))
+            ));
+            assert!(build(action, "a < b").is_ok());
+        }
+    }
+
+    #[test]
+    fn an_oversized_group_description_is_refused_quickly() {
+        let started = std::time::Instant::now();
+        let huge = "<".repeat(1 << 20);
+        let result = SdcPreparedNatWrite::new(
+            NatWriteOperation::CreateRuleGroup,
+            Some("p".to_owned()),
+            None,
+            None,
+            json!({"name": "g", "description": huge}),
+            Value::Null,
+        );
+        assert!(matches!(result, Err(SdcError::InvalidInput(_))));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn newline_and_tab_remain_allowed_in_group_descriptions() {
+        let result = SdcPreparedNatWrite::new(
+            NatWriteOperation::CreateRuleGroup,
+            Some("p".to_owned()),
+            None,
+            None,
+            json!({"name": "g", "description": "a\nb\tc"}),
+            Value::Null,
+        );
+        assert!(result.is_ok());
     }
 }

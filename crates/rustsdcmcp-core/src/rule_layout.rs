@@ -348,6 +348,10 @@ impl SdcPreparedFirewallRuleLayout {
                     || !text_ok(&body.name, 256)
                     || body.name.contains('\n')
                     || !body.description.as_deref().is_none_or(|d| text_ok(d, 2048))
+                    || body
+                        .description
+                        .as_deref()
+                        .is_some_and(crate::prepared::description_looks_like_markup)
                 {
                     return Err(bad_shape(self.action));
                 }
@@ -792,6 +796,9 @@ mod tests {
         assert!(build("a\u{0}b", None).is_err());
         assert!(build(&"x".repeat(257), None).is_err());
         assert!(build("web", Some("bad\u{7}")).is_err());
+        assert!(build("web", Some("<b>x</b>")).is_err(), "markup");
+        assert!(build("web", Some("&lt;")).is_err(), "entity");
+        assert!(build("web", Some("a < b")).is_ok());
         let forged = SdcPreparedFirewallRuleLayout::build(
             FirewallRuleLayoutOperation::CreateGroup,
             "policy-1".to_owned(),
