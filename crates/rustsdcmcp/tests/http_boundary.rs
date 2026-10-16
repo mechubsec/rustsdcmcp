@@ -112,10 +112,8 @@ const PASSED_THE_GUARD: StatusCode = StatusCode::NOT_ACCEPTABLE;
 /// Using reqwest would add a default `Host` that cannot be overridden, so we use
 /// a raw HTTP request to ensure exactly one header of each type.
 async fn probe(url: &str, host: &str, origin: Option<&str>) -> StatusCode {
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .expect("client");
+    // The test server is plain HTTP on loopback; no TLS settings are needed.
+    let client = reqwest::Client::builder().build().expect("client");
 
     let mut req = client.post(format!("{url}/mcp")).header(header::HOST, host);
     if let Some(origin) = origin {
