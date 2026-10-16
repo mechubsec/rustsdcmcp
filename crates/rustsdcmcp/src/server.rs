@@ -19,11 +19,11 @@ use rmcp::{
 use rustsdcmcp_core::{
     ChangeManager, DeviceConfigSection, FirewallLayoutChange, FirewallLayoutRequest,
     FirewallRuleLayoutOperation, FirewallRuleLocation, FirewallRuleScope,
-    FirewallRuleWriteOperation, ImageJob, ListPage, ListRequest, NatWriteOperation,
-    ObjectWriteAction, PolicyOperation, ResourceKind, SdcClient, SdcError, WritableResource,
-    apply_oob_drift, page_list, page_paired_lists, project_ca_certificates, project_license,
-    project_licenses, project_local_certificates, project_users_and_roles, redact_rma_state,
-    redact_secrets,
+    FirewallRuleWriteOperation, ImageJob, IpsFamily, IpsWriteAction, ListPage, ListRequest,
+    NatWriteOperation, ObjectWriteAction, PolicyOperation, ResourceKind, SdcClient, SdcError,
+    WritableResource, apply_oob_drift, page_list, page_paired_lists, project_ca_certificates,
+    project_license, project_licenses, project_local_certificates, project_users_and_roles,
+    redact_rma_state, redact_secrets,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -98,6 +98,8 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "discard_sdc_operation",
     "prepare_sdc_object_write",
     "apply_sdc_object_write",
+    "prepare_sdc_ips_write",
+    "apply_sdc_ips_write",
     "prepare_sdc_nat_write",
     "apply_sdc_nat_write",
     "prepare_sdc_firewall_write",
@@ -125,6 +127,8 @@ pub const WRITE_TOOLS: &[&str] = &[
     "apply_sdc_change_set",
     "prepare_sdc_object_write",
     "apply_sdc_object_write",
+    "prepare_sdc_ips_write",
+    "apply_sdc_ips_write",
     "prepare_sdc_nat_write",
     "apply_sdc_nat_write",
     "prepare_sdc_firewall_write",
@@ -165,6 +169,8 @@ pub const WILDCARD_EXCLUDED_TOOLS: &[&str] = &[
     "apply_sdc_change_set",
     "prepare_sdc_object_write",
     "apply_sdc_object_write",
+    "prepare_sdc_ips_write",
+    "apply_sdc_ips_write",
     "prepare_sdc_nat_write",
     "apply_sdc_nat_write",
     "prepare_sdc_firewall_write",
@@ -1161,6 +1167,45 @@ pub struct PrepareObjectArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApplyObjectArgs {
+    /// Configured tenant alias.
+    pub tenant: String,
+    /// Change-set identifier.
+    pub change_set_id: String,
+    /// Exact approved plan digest.
+    pub expected_digest: String,
+    /// Exact plan digest returned by prepare.
+    pub expected_plan_digest: String,
+    /// Optional external ticket or change reference.
+    #[serde(default)]
+    pub change_ref: Option<String>,
+}
+
+/// Arguments for planning one IPS write.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PrepareIpsArgs {
+    /// Configured tenant alias.
+    pub tenant: String,
+    /// IPS object family: `signature`, `profile`, `rule`, or `exempt_rule`.
+    pub family: IpsFamily,
+    /// Which mutation to plan.
+    pub action: IpsWriteAction,
+    /// Target object UUID. Required for update and delete, rejected for create.
+    #[serde(default)]
+    pub uuid: Option<String>,
+    /// Owning IPS profile UUID. Required for `rule` and `exempt_rule`,
+    /// rejected for `signature` and `profile`.
+    #[serde(default)]
+    pub profile_uuid: Option<String>,
+    /// Object definition. Required for create and update, absent for delete.
+    #[serde(default)]
+    pub body: Option<Value>,
+}
+
+/// Arguments for applying one approved IPS write.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyIpsArgs {
     /// Configured tenant alias.
     pub tenant: String,
     /// Change-set identifier.
@@ -3589,6 +3634,80 @@ impl SdcHandler {
     }
 
     #[tool(
+        name = "prepare_sdc_ips_write",
+        description = "Plan one IPS signature, profile, IPS rule, or exempt-rule create, update, or delete and create a digest-bound change set. This does not write. family is signature|profile|rule|exempt_rule and action is create|update|delete; uuid is required for update and delete and rejected for create; profile_uuid is required for rule and exempt_rule and rejected for signature and profile. Only custom signatures can be updated or deleted (predefined ones, or any not positively identified as custom, are refused), and a profile still referenced by a firewall rule's advanced_security.ips_profile cannot be deleted (the referencing rule UUIDs are returned). IPS writes change SDC's model ONLY and do NOT deploy to any device: reaching a device still needs prepare_sdc_policy_deploy, approval, and apply_sdc_change_set. SDC IPS rules carry no zone or address scope; scope comes from the firewall rule the IPS profile is attached to, so do not try to express it in a rule body. The plan digest covers the exact request body. Signature pattern_sets[].expression is shown verbatim, with a per-expression digest in expression_digests."
+    )]
+    async fn prepare_sdc_ips_write(
+        &self,
+        Parameters(args): Parameters<PrepareIpsArgs>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let caller = caller_from_extensions::<NoGrant>(&extensions);
+        let mut audit = audit_scope(
+            caller,
+            "prepare_sdc_ips_write",
+            "prepare",
+            vec![args.tenant.clone()],
+        );
+        if let Err(error) = self.authorize(caller, "prepare_sdc_ips_write", &args.tenant) {
+            audit.deny("scope");
+            return Ok(tool_error(error));
+        }
+        Ok(finish_redacted(
+            audit,
+            self.changes
+                .prepare_ips_write(
+                    owner(caller),
+                    args.family,
+                    args.action,
+                    args.uuid,
+                    args.profile_uuid,
+                    args.body.unwrap_or(Value::Null),
+                    &cancellation,
+                )
+                .await,
+        ))
+    }
+
+    #[tool(
+        name = "apply_sdc_ips_write",
+        description = "Apply only an independently approved SDC IPS write, refusing it if the target changed since it was planned. This changes SDC's model only and does NOT deploy to any device; a deploy still needs prepare_sdc_policy_deploy, approval, and apply_sdc_change_set."
+    )]
+    async fn apply_sdc_ips_write(
+        &self,
+        Parameters(args): Parameters<ApplyIpsArgs>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let caller = caller_from_extensions::<NoGrant>(&extensions);
+        let mut audit = audit_scope(
+            caller,
+            "apply_sdc_ips_write",
+            "apply",
+            vec![args.tenant.clone()],
+        );
+        if let Err(error) = self.authorize(caller, "apply_sdc_ips_write", &args.tenant) {
+            audit.deny("scope");
+            return Ok(tool_error(error));
+        }
+        let attribution = attribution(caller, args.change_ref);
+        Ok(finish_redacted(
+            audit,
+            self.changes
+                .apply_ips_write(
+                    args.change_set_id,
+                    owner(caller),
+                    args.expected_digest,
+                    args.expected_plan_digest,
+                    &attribution,
+                    &cancellation,
+                )
+                .await,
+        ))
+    }
+
+    #[tool(
         name = "prepare_sdc_firewall_rule_write",
         description = "Plan one firewall policy rule create, update, or delete and create a digest-bound change set. This does not write."
     )]
@@ -4330,6 +4449,67 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn ips_write_tools_require_authentication_and_scope() {
+        for tool in ["prepare_sdc_ips_write", "apply_sdc_ips_write"] {
+            assert!(
+                WRITE_TOOLS.contains(&tool) && WILDCARD_EXCLUDED_TOOLS.contains(&tool),
+                "{tool} must be a write tool excluded from wildcard scope"
+            );
+            assert!(
+                authorize_request(None, tool, "tenant-a", "tenant-a").is_err(),
+                "{tool} must require authentication"
+            );
+            let wildcard = caller(ScopeSet::Wildcard, ScopeSet::Wildcard);
+            assert!(
+                authorize_request(Some(&wildcard), tool, "tenant-a", "tenant-a").is_err(),
+                "a wildcard tool scope must not reach {tool}"
+            );
+            let named = caller(
+                ScopeSet::Allowlist(vec!["tenant-a".to_owned()]),
+                ScopeSet::Allowlist(vec![tool.to_owned()]),
+            );
+            assert!(authorize_request(Some(&named), tool, "tenant-a", "tenant-a").is_ok());
+            assert!(
+                authorize_request(Some(&named), tool, "tenant-b", "tenant-a").is_err(),
+                "{tool} must stay inside the token's tenant"
+            );
+        }
+        // A token scoped to object writes does not reach IPS writes.
+        let object_only = caller(
+            ScopeSet::Allowlist(vec!["tenant-a".to_owned()]),
+            ScopeSet::Allowlist(vec![
+                "prepare_sdc_object_write".to_owned(),
+                "apply_sdc_object_write".to_owned(),
+            ]),
+        );
+        assert!(
+            authorize_request(
+                Some(&object_only),
+                "prepare_sdc_ips_write",
+                "tenant-a",
+                "tenant-a"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn ips_write_arguments_reject_unknown_fields_and_bad_enums() {
+        let ok: PrepareIpsArgs = serde_json::from_value(serde_json::json!({
+            "tenant": "t", "family": "exempt_rule", "action": "create", "profile_uuid": "p"
+        }))
+        .expect("valid arguments");
+        assert_eq!(ok.family, IpsFamily::ExemptRule);
+        for bad in [
+            serde_json::json!({"tenant": "t", "family": "policy", "action": "create"}),
+            serde_json::json!({"tenant": "t", "family": "rule", "action": "move"}),
+            serde_json::json!({"tenant": "t", "family": "rule", "action": "create", "path": "/x"}),
+        ] {
+            assert!(serde_json::from_value::<PrepareIpsArgs>(bad).is_err());
+        }
     }
 
     #[test]

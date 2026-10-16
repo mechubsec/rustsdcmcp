@@ -4,9 +4,9 @@
 //! its reusable foundations are tracked in mecmcp issue #90.
 
 use crate::{
-    DeployRequest, DeploymentStatus, DeviceConfigSection, ImageJob, JobStatus, ListRequest,
-    ListRequestError, PolicyOperation, PreviewRequest, ResourceKind, SdcConfig, SdcPreparedChange,
-    SdcPreparedTarget, TenantScope, WritableResource,
+    DeployRequest, DeploymentStatus, DeviceConfigSection, ImageJob, IpsFamily, JobStatus,
+    ListRequest, ListRequestError, PolicyOperation, PreviewRequest, ResourceKind, SdcConfig,
+    SdcPreparedChange, SdcPreparedTarget, TenantScope, WritableResource,
     models::{DeployResponse, PreviewResponse},
 };
 use futures::StreamExt as _;
@@ -26,6 +26,12 @@ use url::Url;
 /// response, on top of the first attempt.
 /// Page size used to read a firewall scope's full rule ordering.
 const LAYOUT_PAGE_SIZE: u32 = 200;
+
+/// Page size for the firewall-rule scan behind the IPS profile reference guard.
+const SCAN_PAGE_SIZE: u32 = 100;
+
+/// Most items the IPS profile reference scan reads from one collection.
+const MAX_SCAN_ITEMS: usize = 20_000;
 /// Most rules and groups one scope ordering may hold and still be bound to a change.
 const MAX_LAYOUT_ITEMS: usize = 10_000;
 const MAX_RETRY_ATTEMPTS: u32 = 3;
@@ -1375,6 +1381,181 @@ impl SdcClient {
             .await
     }
 
+    /// Fetch one IPS object by family, optional owning profile, and UUID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an identifier is invalid, the profile scope does
+    /// not match the family, or the SDC request fails.
+    pub async fn get_ips_object(
+        &self,
+        family: IpsFamily,
+        profile_uuid: Option<&str>,
+        uuid: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SdcError> {
+        let segments = ips_segments(family, profile_uuid, Some(uuid))?;
+        self.get(&segments, &[], cancellation).await
+    }
+
+    /// Create one IPS object.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an identifier or the body is invalid, or when the
+    /// SDC request fails.
+    pub async fn create_ips_object(
+        &self,
+        family: IpsFamily,
+        profile_uuid: Option<&str>,
+        body: &Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SdcError> {
+        let segments = ips_segments(family, profile_uuid, None)?;
+        validate_object_body(body)?;
+        self.send_write(Method::POST, &segments, Some(body), cancellation)
+            .await
+    }
+
+    /// Replace one IPS object.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an identifier or the body is invalid, or when the
+    /// SDC request fails.
+    pub async fn update_ips_object(
+        &self,
+        family: IpsFamily,
+        profile_uuid: Option<&str>,
+        uuid: &str,
+        body: &Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SdcError> {
+        let segments = ips_segments(family, profile_uuid, Some(uuid))?;
+        validate_object_body(body)?;
+        self.send_write(Method::PUT, &segments, Some(body), cancellation)
+            .await
+    }
+
+    /// Delete one IPS object.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an identifier is invalid or the SDC request fails.
+    pub async fn delete_ips_object(
+        &self,
+        family: IpsFamily,
+        profile_uuid: Option<&str>,
+        uuid: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SdcError> {
+        let segments = ips_segments(family, profile_uuid, Some(uuid))?;
+        self.send_write(Method::DELETE, &segments, None, cancellation)
+            .await
+    }
+
+    /// UUIDs of every firewall rule whose `advanced_security.ips_profile`
+    /// points at the given IPS profile, sorted and de-duplicated.
+    ///
+    /// Walks every firewall policy and both of its scopes. The scope rule list
+    /// is documented as traversing every nesting level, so rule groups need no
+    /// separate pass. The scan fails closed: a read that errors, a result too
+    /// large to read, or a tenant over the scan cap refuses rather than
+    /// reporting "unreferenced". It does not cover references from global
+    /// settings or the global profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the profile UUID is invalid, any read fails, or the
+    /// tenant is larger than the bounded scan.
+    pub async fn find_ips_profile_references(
+        &self,
+        profile_uuid: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<String>, SdcError> {
+        validate_atom("profile_uuid", profile_uuid)?;
+        let policies = self
+            .list_every_item(&["api", "v1", "policies", "firewall"], cancellation)
+            .await?;
+        let mut references = std::collections::BTreeSet::new();
+        for policy in &policies {
+            let Some(policy_uuid) = policy.get("uuid").and_then(Value::as_str) else {
+                return Err(SdcError::InvalidInput(
+                    "a firewall policy in the reference scan has no UUID",
+                ));
+            };
+            validate_atom("policy_uuid", policy_uuid)?;
+            for scope in ["global", "zone"] {
+                let rules = self
+                    .list_every_item(
+                        &[
+                            "api",
+                            "v1",
+                            "policies",
+                            "firewall",
+                            policy_uuid,
+                            scope,
+                            "rules",
+                        ],
+                        cancellation,
+                    )
+                    .await?;
+                for rule in &rules {
+                    let referenced = rule
+                        .pointer("/advanced_security/ips_profile/uuid")
+                        .and_then(Value::as_str)
+                        == Some(profile_uuid);
+                    if !referenced {
+                        continue;
+                    }
+                    let Some(rule_uuid) = rule.get("uuid").and_then(Value::as_str) else {
+                        return Err(SdcError::InvalidInput(
+                            "a firewall rule referencing the IPS profile has no UUID",
+                        ));
+                    };
+                    references.insert(rule_uuid.to_owned());
+                }
+            }
+        }
+        Ok(references.into_iter().collect())
+    }
+
+    /// Read every item of a paginated collection, bounded by
+    /// `MAX_SCAN_ITEMS`. A server that ignores `from` can never terminate the
+    /// loop early, so it trips the cap and refuses instead of looping.
+    async fn list_every_item(
+        &self,
+        segments: &[&str],
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<Value>, SdcError> {
+        let size = self.max_page_size.min(SCAN_PAGE_SIZE);
+        let mut items: Vec<Value> = Vec::new();
+        loop {
+            let from = u64::try_from(items.len()).map_err(|_| SdcError::Serialization)?;
+            let page = ListRequest::new(from, size, self.max_page_size)?;
+            let body = self.list(segments, page, cancellation).await?;
+            let Some(page_items) = body.get("items").and_then(Value::as_array) else {
+                // An empty collection may come back as a bare object.
+                if body.as_object().is_some_and(serde_json::Map::is_empty) {
+                    return Ok(items);
+                }
+                return Err(SdcError::InvalidInput(
+                    "a collection read during a reference scan has no items list",
+                ));
+            };
+            let short = page_items.len() < size as usize;
+            items.extend(page_items.iter().cloned());
+            if items.len() > MAX_SCAN_ITEMS {
+                return Err(SdcError::InvalidInput(
+                    "the tenant is too large for a complete IPS reference scan",
+                ));
+            }
+            if short {
+                return Ok(items);
+            }
+        }
+    }
+
     /// List IPsec profiles with bounded pagination.
     ///
     /// This is a `/api/v2/` endpoint, unlike most policy and device operations.
@@ -2664,6 +2845,45 @@ fn validate_object_body(body: &Value) -> Result<(), SdcError> {
     Ok(())
 }
 
+/// Path segments for an IPS object. Signatures and profiles are top-level;
+/// rules and exempt rules live under a profile, and `profile_uuid` is required
+/// for those and refused for the others.
+fn ips_segments<'a>(
+    family: IpsFamily,
+    profile_uuid: Option<&'a str>,
+    uuid: Option<&'a str>,
+) -> Result<Vec<&'a str>, SdcError> {
+    let mut segments = vec!["api", "v1"];
+    match (family, profile_uuid) {
+        (IpsFamily::Signature, None) => segments.push("ips_signatures"),
+        (IpsFamily::Profile, None) => segments.push("ips_profiles"),
+        (IpsFamily::Rule | IpsFamily::ExemptRule, Some(profile_uuid)) => {
+            validate_atom("profile_uuid", profile_uuid)?;
+            segments.extend(["ips_profiles", profile_uuid]);
+            segments.push(if family == IpsFamily::Rule {
+                "ips_rules"
+            } else {
+                "exempt_rules"
+            });
+        }
+        (IpsFamily::Rule | IpsFamily::ExemptRule, None) => {
+            return Err(SdcError::InvalidIdentifier {
+                field: "profile_uuid",
+            });
+        }
+        (IpsFamily::Signature | IpsFamily::Profile, Some(_)) => {
+            return Err(SdcError::InvalidInput(
+                "profile_uuid applies only to IPS rules and exempt rules",
+            ));
+        }
+    }
+    if let Some(uuid) = uuid {
+        validate_atom("uuid", uuid)?;
+        segments.push(uuid);
+    }
+    Ok(segments)
+}
+
 /// Path segments for a firewall rule, directly under the policy scope or
 /// inside one of its rule groups. Every identifier is validated, and the scope
 /// is restricted to the two values the API defines.
@@ -2866,6 +3086,10 @@ pub enum SdcError {
     /// A change-controlled target moved between planning and writing.
     #[error("object changed since it was prepared; re-prepare to see the current state")]
     TargetDrifted,
+
+    /// An IPS-specific safety guard refused the write.
+    #[error("IPS write refused: {0}")]
+    IpsGuard(String),
 }
 
 impl SdcError {
@@ -3348,6 +3572,228 @@ mod tests {
                 "identifier {identifier:?} produced {error:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn ips_writes_use_the_exact_collection_item_paths() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let record = |label: &'static str, seen: Arc<std::sync::Mutex<Vec<String>>>| async move {
+            seen.lock().expect("test mutex").push(label.to_owned());
+            Json(serde_json::json!({}))
+        };
+        let app = Router::new()
+            .route(
+                "/api/v1/ips_signatures",
+                post({
+                    let seen = seen.clone();
+                    move || record("POST signature", seen)
+                }),
+            )
+            .route(
+                "/api/v1/ips_signatures/s1",
+                put({
+                    let seen = seen.clone();
+                    move || record("PUT signature", seen)
+                })
+                .delete({
+                    let seen = seen.clone();
+                    move || record("DELETE signature", seen)
+                }),
+            )
+            .route(
+                "/api/v1/ips_profiles/p1/ips_rules",
+                post({
+                    let seen = seen.clone();
+                    move || record("POST rule", seen)
+                }),
+            )
+            .route(
+                "/api/v1/ips_profiles/p1/ips_rules/r1",
+                put({
+                    let seen = seen.clone();
+                    move || record("PUT rule", seen)
+                })
+                .delete({
+                    let seen = seen.clone();
+                    move || record("DELETE rule", seen)
+                }),
+            )
+            .route(
+                "/api/v1/ips_profiles/p1/exempt_rules",
+                post({
+                    let seen = seen.clone();
+                    move || record("POST exempt", seen)
+                }),
+            )
+            .route(
+                "/api/v1/ips_profiles",
+                post({
+                    let seen = seen.clone();
+                    move || record("POST profile", seen)
+                }),
+            )
+            .route(
+                "/api/v1/ips_profiles/p1",
+                put({
+                    let seen = seen.clone();
+                    move || record("PUT profile", seen)
+                })
+                .delete({
+                    let seen = seen.clone();
+                    move || record("DELETE profile", seen)
+                }),
+            )
+            .route(
+                "/api/v1/ips_profiles/p1/exempt_rules/e1",
+                put({
+                    let seen = seen.clone();
+                    move || record("PUT exempt", seen)
+                })
+                .delete({
+                    let seen = seen.clone();
+                    move || record("DELETE exempt", seen)
+                }),
+            );
+        let (base_url, server) = serve(app).await;
+        let sdc = client(base_url, 4096);
+        let token = CancellationToken::new();
+        let body = serde_json::json!({"name": "x"});
+        let profile = Some("p1");
+        sdc.create_ips_object(IpsFamily::Signature, None, &body, &token)
+            .await
+            .expect("1");
+        sdc.update_ips_object(IpsFamily::Signature, None, "s1", &body, &token)
+            .await
+            .expect("2");
+        sdc.delete_ips_object(IpsFamily::Signature, None, "s1", &token)
+            .await
+            .expect("3");
+        sdc.create_ips_object(IpsFamily::Profile, None, &body, &token)
+            .await
+            .expect("4");
+        sdc.update_ips_object(IpsFamily::Profile, None, "p1", &body, &token)
+            .await
+            .expect("5");
+        sdc.delete_ips_object(IpsFamily::Profile, None, "p1", &token)
+            .await
+            .expect("6");
+        sdc.create_ips_object(IpsFamily::Rule, profile, &body, &token)
+            .await
+            .expect("7");
+        sdc.update_ips_object(IpsFamily::Rule, profile, "r1", &body, &token)
+            .await
+            .expect("8");
+        sdc.delete_ips_object(IpsFamily::Rule, profile, "r1", &token)
+            .await
+            .expect("9");
+        sdc.create_ips_object(IpsFamily::ExemptRule, profile, &body, &token)
+            .await
+            .expect("10");
+        sdc.update_ips_object(IpsFamily::ExemptRule, profile, "e1", &body, &token)
+            .await
+            .expect("11");
+        sdc.delete_ips_object(IpsFamily::ExemptRule, profile, "e1", &token)
+            .await
+            .expect("12");
+        let mut seen = seen.lock().expect("test mutex").clone();
+        seen.sort();
+        assert_eq!(seen.len(), 12, "{seen:?}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn ips_writes_refuse_a_mismatched_profile_scope_and_hostile_identifiers() {
+        let sdc = client(
+            Url::parse("https://example.invalid/").expect("test URL"),
+            1024,
+        );
+        let token = CancellationToken::new();
+        let body = serde_json::json!({"name": "x"});
+        // Profile-scoped families need a profile; the others reject one.
+        assert!(
+            sdc.create_ips_object(IpsFamily::Rule, None, &body, &token)
+                .await
+                .is_err()
+        );
+        assert!(
+            sdc.create_ips_object(IpsFamily::Signature, Some("p"), &body, &token)
+                .await
+                .is_err()
+        );
+        for hostile in ["", ".", "..", "with space", "tab\there"] {
+            assert!(
+                sdc.delete_ips_object(IpsFamily::Rule, Some("p1"), hostile, &token)
+                    .await
+                    .is_err(),
+                "{hostile:?}"
+            );
+            assert!(
+                sdc.delete_ips_object(IpsFamily::Rule, Some(hostile), "r1", &token)
+                    .await
+                    .is_err(),
+                "{hostile:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ips_profile_reference_scan_reads_every_page_and_fails_closed() {
+        let paged = |total: usize, ignore_from: bool| {
+            Router::new()
+                .route(
+                    "/api/v1/policies/firewall",
+                    get(|| async {
+                        Json(serde_json::json!({"items": [{"uuid": "pol"}], "count": 1}))
+                    }),
+                )
+                .route(
+                    "/api/v1/policies/firewall/pol/global/rules",
+                    get(|| async { Json(serde_json::json!({"items": [], "count": 0})) }),
+                )
+                .route(
+                    "/api/v1/policies/firewall/pol/zone/rules",
+                    get(
+                        move |Query(query): Query<HashMap<String, String>>| async move {
+                            let from: usize = query["from"].parse().expect("from");
+                            let size: usize = query["size"].parse().expect("size");
+                            let from = if ignore_from { 0 } else { from };
+                            let items: Vec<_> = (from..total.min(from + size))
+                                .map(|n| {
+                                    serde_json::json!({
+                                        "uuid": format!("r{n}"),
+                                        // Only the last rule references the profile.
+                                        "advanced_security": {"ips_profile":
+                                            {"uuid": if n + 1 == total { "p1" } else { "other" }}},
+                                    })
+                                })
+                                .collect();
+                            Json(serde_json::json!({"items": items, "count": total}))
+                        },
+                    ),
+                )
+        };
+        let scan = |app: Router| async move {
+            let (base_url, server) = serve(app).await;
+            let result = client(base_url, 1 << 20)
+                .find_ips_profile_references("p1", &CancellationToken::new())
+                .await;
+            server.abort();
+            result
+        };
+        assert_eq!(
+            scan(paged(250, false)).await.expect("scan"),
+            vec!["r249".to_owned()]
+        );
+        assert!(
+            scan(paged(250, true)).await.is_err(),
+            "a server ignoring from cannot be shown complete"
+        );
+        // A scope that errors is never read as "unreferenced".
+        let broken = Router::new().route(
+            "/api/v1/policies/firewall",
+            get(|| async { Json(serde_json::json!({"items": [{"uuid": "pol"}], "count": 1})) }),
+        );
+        assert!(scan(broken).await.is_err());
     }
 
     #[tokio::test]

@@ -505,6 +505,44 @@ an approval lifetime on an existing deployment.
 
 The effective values are logged at startup.
 
+## IPS content writes
+
+`prepare_sdc_ips_write` and `apply_sdc_ips_write` change IPS content in SDC:
+custom signatures, IPS profiles, IPS rules inside a profile, and exempt rules
+inside a profile. They follow the same prepare, independent approval, apply
+flow as the other writes, and are excluded from wildcard token scopes.
+
+- **They do not deploy.** A successful apply changes SDC's model only. Reaching
+  a device still takes `prepare_sdc_policy_deploy`, approval, and
+  `apply_sdc_change_set`.
+- **No zone or address scope on IPS rules.** SDC's IPS rule model has no match
+  zones or addresses. Scope comes from the firewall rule the profile is
+  attached to, so rule-level scoping imported from a device is dropped on the
+  next deploy.
+- **Custom signatures only.** An update or delete of a signature is refused
+  unless the observed signature is positively identified as custom. The
+  OpenAPI export has no custom or predefined field, so the check uses the
+  documented provenance fields: a known `signature_type`
+  (`anomaly`, `signature`, `chain`, `static`, `dynamic`) and an absent or empty
+  `import_id` and `activation_date`, which are set only for signatures imported
+  from a bundle. It fails closed, and the discriminator is to be confirmed
+  against a live tenant.
+- **A referenced profile is not deleted.** The delete is refused, and the
+  referencing firewall rule UUIDs are returned, while any rule's
+  `advanced_security.ips_profile` points at the profile. The scan covers every
+  firewall policy and both scopes, and is repeated at apply time. It does not
+  cover references from global settings or the global profile, which SDC itself
+  still rejects. A tenant too large to scan completely is refused, not assumed
+  unreferenced.
+- **Drift contract.** The plan records the exact request and the target's
+  observed state. Apply is refused if the target changed since prepare.
+- **Pattern expressions.** The plan digest covers the exact request body. The
+  prepare and apply output carry each signature `pattern_sets[].expression`
+  unaltered, because the generic redaction would rewrite `$`-prefixed and
+  multi-line text and an approver has to read the real pattern. Every other
+  field is still redacted. `expression_digests` lists a digest per expression
+  so a mismatch between what was read and what was planned is detectable.
+
 ## Co-managing an SRX with SDC
 
 ### Out-of-band drift is cleared in the portal, not here
@@ -595,6 +633,11 @@ SDC commits as user `sduser` over NETCONF using `commit confirmed` with a
 1-minute rollback, then confirms approximately 1 second later, tagging commits
 `EMS System Commit <uuid> EMS_REQ_ID:<uuid>`. A device that goes unreachable
 mid-deploy auto-reverts.
+
+Because a deploy is two commits (the commit-confirmed, then the confirm), the
+device's pre-deploy restore point is `rollback 2`, not `rollback 1`. To undo a
+deploy by hand on the device, roll back to `rollback 2` rather than the latest
+commit.
 
 ### Open question
 

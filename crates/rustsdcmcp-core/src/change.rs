@@ -1,10 +1,10 @@
 //! SDC adapter for the shared preview-bound, two-person change lifecycle.
 
 use crate::{
-    DeployRequest, JobStatus, NatValidationReport, NatWriteOperation, ObjectValidationReport,
-    ObjectWriteAction, PolicyOperation, SdcClient, SdcError, SdcNatTransaction,
-    SdcObjectTransaction, SdcPreparedChange, SdcPreparedNatWrite, SdcPreparedObjectWrite,
-    WritableResource,
+    DeployRequest, IpsFamily, IpsValidationReport, IpsWriteAction, JobStatus, NatValidationReport,
+    NatWriteOperation, ObjectValidationReport, ObjectWriteAction, PolicyOperation, SdcClient,
+    SdcError, SdcIpsTransaction, SdcNatTransaction, SdcObjectTransaction, SdcPreparedChange,
+    SdcPreparedIpsWrite, SdcPreparedNatWrite, SdcPreparedObjectWrite, WritableResource,
 };
 use async_trait::async_trait;
 use mecmcp_audit::Attribution;
@@ -27,6 +27,8 @@ use tokio_util::sync::CancellationToken;
 pub enum ChangeKind {
     /// Object create/update/delete write.
     ObjectWrite,
+    /// IPS signature, profile, rule, or exempt-rule write.
+    IpsWrite,
     /// Firewall policy write.
     FirewallWrite,
     /// Firewall policy rule write.
@@ -308,6 +310,37 @@ pub struct ObjectApplyResult {
     pub outcome: CommitOutcome,
 }
 
+/// Output of the SDC IPS-write plan phase.
+#[derive(Debug, Clone, Serialize)]
+pub struct IpsPrepareResult {
+    /// Shared two-person change-set record.
+    pub change_set: ChangeSetOutput,
+    /// Exact IPS write bound by the plan digest.
+    pub prepared_change: SdcPreparedIpsWrite,
+    /// Digest of each signature pattern expression, so an approver can check
+    /// that the expression they read is the one that was planned.
+    pub expression_digests: Vec<crate::ExpressionDigest>,
+    /// Reminder that this write does not reach a device.
+    pub deploys: bool,
+}
+
+/// Result of applying one approved SDC IPS write.
+#[derive(Debug, Clone, Serialize)]
+pub struct IpsApplyResult {
+    /// Shared operation identifier.
+    pub operation_id: String,
+    /// Before/after plan used as the management-plane diff.
+    pub plan: Value,
+    /// Digest of each signature pattern expression in the plan.
+    pub expression_digests: Vec<crate::ExpressionDigest>,
+    /// Drift and envelope validation result.
+    pub validation: IpsValidationReport,
+    /// Known, detached, or indeterminate commit disposition.
+    pub outcome: CommitOutcome,
+    /// Always false: an IPS write changes SDC's model, not a device.
+    pub deploys: bool,
+}
+
 /// Output of the SDC NAT-write plan phase.
 #[derive(Debug, Clone, Serialize)]
 pub struct NatPrepareResult {
@@ -338,6 +371,7 @@ pub struct ChangeManager {
     endpoint: String,
     policy_signature: String,
     object_signature: String,
+    ips_signature: String,
     nat_signature: String,
     firewall_rule_signature: String,
     license_signature: String,
@@ -378,6 +412,8 @@ impl ChangeManager {
             mutation_policy_signature(format!("sdc-policy-deploy-v1:{tenant}:{endpoint}"));
         let object_signature =
             mutation_policy_signature(format!("sdc-object-write-v1:{tenant}:{endpoint}"));
+        let ips_signature =
+            mutation_policy_signature(format!("sdc-ips-write-v1:{tenant}:{endpoint}"));
         let nat_signature =
             mutation_policy_signature(format!("sdc-nat-write-v1:{tenant}:{endpoint}"));
         let firewall_rule_signature =
@@ -405,6 +441,7 @@ impl ChangeManager {
             endpoint,
             policy_signature,
             object_signature,
+            ips_signature,
             nat_signature,
             firewall_rule_signature,
             license_signature,
@@ -623,6 +660,251 @@ impl ChangeManager {
             plan,
             validation,
             outcome,
+        })
+    }
+
+    /// Resolve an IPS object's current state and create its digest-bound plan.
+    ///
+    /// Create carries no prior state; update and delete read the live object so
+    /// the plan records exactly what the write would replace or remove. A
+    /// signature update or delete is refused unless the observed signature is
+    /// custom, and a profile delete is refused while firewall rules reference
+    /// it. Neither check creates a change set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the arguments do not fit the action or family, an
+    /// IPS guard refuses, the target cannot be read, the envelope is invalid,
+    /// or change-control state cannot be written.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prepare_ips_write(
+        &self,
+        owner: String,
+        family: IpsFamily,
+        action: IpsWriteAction,
+        uuid: Option<String>,
+        profile_uuid: Option<String>,
+        request: Value,
+        cancellation: &CancellationToken,
+    ) -> Result<IpsPrepareResult, SdcError> {
+        if family.is_profile_scoped() != profile_uuid.is_some() {
+            return Err(SdcError::InvalidInput(
+                "profile_uuid is required for rule and exempt_rule and rejected for other families",
+            ));
+        }
+        match (action, uuid.is_some()) {
+            (IpsWriteAction::Create, true) => {
+                return Err(SdcError::InvalidInput("create must not carry a uuid"));
+            }
+            (IpsWriteAction::Update | IpsWriteAction::Delete, false) => {
+                return Err(SdcError::InvalidInput(
+                    "update and delete require the target uuid",
+                ));
+            }
+            _ => {}
+        }
+        // Reject unsafe identifiers before any request is built from them.
+        if let Some(identifier) = uuid.as_deref() {
+            crate::ips_write::validate_ips_identifier("uuid", identifier)?;
+        }
+        if let Some(identifier) = profile_uuid.as_deref() {
+            crate::ips_write::validate_ips_identifier("profile_uuid", identifier)?;
+        }
+        let before = match uuid.as_deref() {
+            Some(identifier) if action != IpsWriteAction::Create => {
+                self.client
+                    .get_ips_object(family, profile_uuid.as_deref(), identifier, cancellation)
+                    .await?
+            }
+            _ => Value::Null,
+        };
+        if let (IpsFamily::Profile, IpsWriteAction::Delete, Some(identifier)) =
+            (family, action, uuid.as_deref())
+        {
+            let references = self
+                .client
+                .find_ips_profile_references(identifier, cancellation)
+                .await?;
+            if !references.is_empty() {
+                return Err(crate::ips_write::profile_in_use(&references));
+            }
+        }
+        let prepared =
+            SdcPreparedIpsWrite::new(family, action, uuid, profile_uuid, request, before)?;
+        let change_set = self
+            .coordinator
+            .create_change_set(
+                self.tenant.clone(),
+                vec![prepared.clone()],
+                owner.clone(),
+                prepared.plan_digest().to_owned(),
+                self.ips_signature.clone(),
+                None,
+            )
+            .await
+            .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
+        let change_set = self
+            .waive_if_lab_mode(change_set, &owner, ChangeKind::IpsWrite)
+            .await?;
+        Ok(IpsPrepareResult {
+            change_set,
+            expression_digests: prepared.expression_digests(),
+            prepared_change: prepared,
+            deploys: false,
+        })
+    }
+
+    /// Discard an IPS write that failed before anything was sent to SDC.
+    async fn release_unwritten_ips(
+        &self,
+        operation_id: &str,
+        owner: &str,
+        expected_plan_digest: &str,
+        transaction: &SdcIpsTransaction,
+        cancellation: &CancellationToken,
+    ) -> String {
+        match self
+            .coordinator
+            .discard_operation(
+                operation_id,
+                &self.tenant,
+                owner,
+                expected_plan_digest,
+                transaction,
+                cancellation,
+            )
+            .await
+        {
+            Ok(_) => "the planned write was discarded".to_owned(),
+            Err(discard_error) => format!(
+                "the planned write also could not be discarded and needs manual resolution: {discard_error}"
+            ),
+        }
+    }
+
+    /// Apply, diff, drift-check, and commit one exact approved IPS write.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when approval does not match, the target drifted since
+    /// prepare, a guard now refuses, or the SDC write fails.
+    pub async fn apply_ips_write(
+        &self,
+        change_set_id: String,
+        owner: String,
+        expected_digest: String,
+        expected_plan_digest: String,
+        attribution: &Attribution,
+        cancellation: &CancellationToken,
+    ) -> Result<IpsApplyResult, SdcError> {
+        let transaction = SdcIpsTransaction::new(
+            self.client.clone(),
+            expected_plan_digest.clone(),
+            cancellation.clone(),
+        );
+        let applied = self
+            .coordinator
+            .apply_change_set(
+                change_set_id,
+                self.tenant.clone(),
+                self.endpoint.clone(),
+                owner.clone(),
+                expected_digest,
+                expected_plan_digest.clone(),
+                &transaction,
+                "ips_write",
+                None,
+                None,
+                attribution,
+                cancellation,
+            )
+            .await
+            .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
+        let operation_id = applied.operation_id;
+        let staged = applied.staged;
+        let plan = self
+            .coordinator
+            .diff_operation(
+                &operation_id,
+                &self.tenant,
+                &owner,
+                &expected_plan_digest,
+                &transaction,
+                &staged,
+                cancellation,
+            )
+            .await
+            .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
+        let validation = match self
+            .coordinator
+            .validate_operation(
+                &operation_id,
+                &self.tenant,
+                &owner,
+                &expected_plan_digest,
+                &transaction,
+                &staged,
+                cancellation,
+            )
+            .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                // Staging and validation only read, so nothing was written and
+                // discarding the `Failed` record is truthful.
+                let detail = self
+                    .release_unwritten_ips(
+                        &operation_id,
+                        &owner,
+                        &expected_plan_digest,
+                        &transaction,
+                        cancellation,
+                    )
+                    .await;
+                return Err(SdcError::ChangeControl(format!("{error}; {detail}")));
+            }
+        };
+        let outcome = match self
+            .coordinator
+            .commit_operation(
+                &operation_id,
+                &self.tenant,
+                &owner,
+                &expected_plan_digest,
+                &self.ips_signature,
+                &transaction,
+                &staged,
+                attribution,
+                &CommitOptions::default(),
+                cancellation,
+            )
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // Only a refusal before anything was sent is safe to discard.
+                if !transaction.refused_before_write() {
+                    return Err(SdcError::ChangeControl(error.to_string()));
+                }
+                let detail = self
+                    .release_unwritten_ips(
+                        &operation_id,
+                        &owner,
+                        &expected_plan_digest,
+                        &transaction,
+                        cancellation,
+                    )
+                    .await;
+                return Err(SdcError::ChangeControl(format!("{error}; {detail}")));
+            }
+        };
+        Ok(IpsApplyResult {
+            operation_id,
+            expression_digests: staged.expression_digests(),
+            plan,
+            validation,
+            outcome,
+            deploys: false,
         })
     }
 
@@ -2691,6 +2973,7 @@ mod tests {
     #[test]
     fn only_oob_kinds_refuse_the_lab_mode_waiver() {
         assert!(ChangeKind::ObjectWrite.allows_lab_mode_waiver());
+        assert!(ChangeKind::IpsWrite.allows_lab_mode_waiver());
         assert!(ChangeKind::FirewallWrite.allows_lab_mode_waiver());
         assert!(ChangeKind::LicenseWrite.allows_lab_mode_waiver());
         assert!(ChangeKind::NatWrite.allows_lab_mode_waiver());
@@ -3544,6 +3827,331 @@ mod tests {
             "unexpected error: {error:?}"
         );
 
+        server.abort();
+    }
+
+    fn ips_manager(base_url: &Url, lab_mode: bool) -> ChangeManager {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client =
+            SdcClient::from_test_parts(base_url.as_str(), "test-secret".to_owned(), 64 * 1024, 100);
+        ChangeManager::load(
+            client,
+            "tenant-a",
+            base_url.to_string(),
+            None,
+            Duration::from_secs(60),
+            lab_mode,
+            None,
+            None,
+        )
+        .expect("change manager")
+    }
+
+    #[tokio::test]
+    async fn an_ips_signature_goes_prepare_to_apply_with_the_exact_body() {
+        let expression = "$6$ABC.*password=admin";
+        let wrote = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let wrote_for_route = wrote.clone();
+        let app = Router::new().route(
+            "/api/v1/ips_signatures",
+            post(move |Json(body): Json<Value>| {
+                let wrote = wrote_for_route.clone();
+                async move {
+                    wrote.lock().expect("test mutex").push(body);
+                    Json(json!({"uuid": "sig-new"}))
+                }
+            }),
+        );
+        let (base_url, server) = serve(app).await;
+        let manager = ips_manager(&base_url, true);
+        let cancellation = CancellationToken::new();
+        let body = json!({
+            "name": "custom-sig",
+            "signature_type": "signature",
+            "pattern_sets": [{"service": "HTTP", "expression": expression}],
+        });
+        let prepared = manager
+            .prepare_ips_write(
+                "alice".to_owned(),
+                IpsFamily::Signature,
+                IpsWriteAction::Create,
+                None,
+                None,
+                body.clone(),
+                &cancellation,
+            )
+            .await
+            .expect("prepare");
+        assert!(!prepared.deploys);
+        assert_eq!(prepared.expression_digests.len(), 1);
+        // The approver sees the real expression in the redacted tool output,
+        // and its digest matches the one computed from what they read.
+        let shown = crate::redact_secrets(serde_json::to_value(&prepared).expect("serialize"));
+        assert_eq!(
+            shown["prepared_change"]["request"]["pattern_sets"][0]["expression"],
+            expression
+        );
+        assert_eq!(
+            shown["expression_digests"][0]["digest"],
+            crate::prepared::canonical_digest(&Value::String(expression.to_owned()))
+                .expect("digest")
+        );
+        let applied = manager
+            .apply_ips_write(
+                prepared.change_set.change_set_id.clone(),
+                "alice".to_owned(),
+                prepared.change_set.digest.clone(),
+                prepared.prepared_change.plan_digest().to_owned(),
+                &Attribution::stdio(),
+                &cancellation,
+            )
+            .await
+            .expect("a single operator applies in lab mode");
+        assert!(matches!(applied.outcome, CommitOutcome::Reconciled { .. }));
+        assert!(!applied.deploys);
+        // SDC received the exact body, byte for byte, not a redacted rendering.
+        assert_eq!(*wrote.lock().expect("test mutex"), vec![body]);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_ips_update_refuses_apply_when_the_target_drifted_after_prepare() {
+        let current = Arc::new(std::sync::Mutex::new(
+            json!({"uuid": "r1", "name": "as-prepared"}),
+        ));
+        let current_for_route = current.clone();
+        let puts = Arc::new(AtomicUsize::new(0));
+        let puts_for_route = puts.clone();
+        let app = Router::new().route(
+            "/api/v1/ips_profiles/p1/ips_rules/r1",
+            get(move || {
+                let value = current_for_route.lock().expect("test mutex").clone();
+                async move { Json(value) }
+            })
+            .put(move || {
+                puts_for_route.fetch_add(1, Ordering::SeqCst);
+                async { Json(json!({})) }
+            }),
+        );
+        let (base_url, server) = serve(app).await;
+        let manager = ips_manager(&base_url, true);
+        let cancellation = CancellationToken::new();
+        let prepared = manager
+            .prepare_ips_write(
+                "alice".to_owned(),
+                IpsFamily::Rule,
+                IpsWriteAction::Update,
+                Some("r1".to_owned()),
+                Some("p1".to_owned()),
+                json!({"name": "new"}),
+                &cancellation,
+            )
+            .await
+            .expect("prepare");
+        assert_eq!(prepared.prepared_change.before()["name"], "as-prepared");
+
+        *current.lock().expect("test mutex") = json!({"uuid": "r1", "name": "edited-in-portal"});
+        let error = manager
+            .apply_ips_write(
+                prepared.change_set.change_set_id.clone(),
+                "alice".to_owned(),
+                prepared.change_set.digest.clone(),
+                prepared.prepared_change.plan_digest().to_owned(),
+                &Attribution::stdio(),
+                &cancellation,
+            )
+            .await
+            .expect_err("a drifted target must not be written");
+        assert!(error.to_string().contains("changed since"), "{error}");
+        assert_eq!(puts.load(Ordering::SeqCst), 0, "nothing may reach SDC");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn apply_refuses_a_wrong_digest_and_an_unapproved_change_set() {
+        let app = Router::new().route(
+            "/api/v1/ips_profiles",
+            post(|| async { Json(json!({"uuid": "p-new"})) }),
+        );
+        let (base_url, server) = serve(app).await;
+        // Not lab mode: a second principal must approve.
+        let manager = ips_manager(&base_url, false);
+        let cancellation = CancellationToken::new();
+        let prepared = manager
+            .prepare_ips_write(
+                "alice".to_owned(),
+                IpsFamily::Profile,
+                IpsWriteAction::Create,
+                None,
+                None,
+                json!({"name": "prof"}),
+                &cancellation,
+            )
+            .await
+            .expect("prepare");
+        let apply = |digest: String, plan: String| {
+            let manager = &manager;
+            let id = prepared.change_set.change_set_id.clone();
+            let cancellation = cancellation.clone();
+            async move {
+                manager
+                    .apply_ips_write(
+                        id,
+                        "alice".to_owned(),
+                        digest,
+                        plan,
+                        &Attribution::stdio(),
+                        &cancellation,
+                    )
+                    .await
+            }
+        };
+        apply(
+            prepared.change_set.digest.clone(),
+            prepared.prepared_change.plan_digest().to_owned(),
+        )
+        .await
+        .expect_err("an unapproved change set must not apply");
+        apply("sha256:wrong".to_owned(), "sha256:wrong".to_owned())
+            .await
+            .expect_err("a digest the approver never saw must not apply");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn prepare_refuses_a_predefined_signature_and_never_creates_a_change_set() {
+        let app = Router::new().route(
+            "/api/v1/ips_signatures/sig-1",
+            get(|| async {
+                Json(json!({
+                    "uuid": "sig-1", "name": "HTTP:XSS", "signature_type": "signature",
+                    "import_id": "HTTP:XSS:1234"
+                }))
+            }),
+        );
+        let (base_url, server) = serve(app).await;
+        let manager = ips_manager(&base_url, true);
+        for action in [IpsWriteAction::Update, IpsWriteAction::Delete] {
+            let error = manager
+                .prepare_ips_write(
+                    "alice".to_owned(),
+                    IpsFamily::Signature,
+                    action,
+                    Some("sig-1".to_owned()),
+                    None,
+                    if action == IpsWriteAction::Update {
+                        json!({"name": "renamed"})
+                    } else {
+                        Value::Null
+                    },
+                    &CancellationToken::new(),
+                )
+                .await
+                .expect_err("a predefined signature is immutable here");
+            assert!(matches!(error, SdcError::IpsGuard(_)), "{error:?}");
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn prepare_refuses_deleting_a_referenced_profile_and_names_the_rules() {
+        let app = Router::new()
+            .route(
+                "/api/v1/ips_profiles/p1",
+                get(|| async { Json(json!({"uuid": "p1", "name": "prof"})) }),
+            )
+            .route(
+                "/api/v1/policies/firewall",
+                get(|| async { Json(json!({"items": [{"uuid": "pol1"}], "count": 1})) }),
+            )
+            .route(
+                "/api/v1/policies/firewall/pol1/global/rules",
+                get(|| async {
+                    Json(json!({"items": [
+                        {"uuid": "fw-1", "advanced_security": {"ips_profile": {"uuid": "p1"}}},
+                    ], "count": 1}))
+                }),
+            )
+            .route(
+                "/api/v1/policies/firewall/pol1/zone/rules",
+                get(|| async {
+                    Json(json!({"items": [
+                        {"uuid": "fw-2", "advanced_security": {"ips_profile": {"uuid": "p1"}}},
+                    ], "count": 1}))
+                }),
+            );
+        let (base_url, server) = serve(app).await;
+        let manager = ips_manager(&base_url, true);
+        let error = manager
+            .prepare_ips_write(
+                "alice".to_owned(),
+                IpsFamily::Profile,
+                IpsWriteAction::Delete,
+                Some("p1".to_owned()),
+                None,
+                Value::Null,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("a referenced profile must not be planned for deletion");
+        let message = error.to_string();
+        assert!(
+            message.contains("fw-1") && message.contains("fw-2"),
+            "{message}"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn prepare_refuses_mismatched_arguments_before_any_request() {
+        // No routes: any request would 404, but none should be made.
+        let (base_url, server) = serve(Router::new()).await;
+        let manager = ips_manager(&base_url, true);
+        let cancellation = CancellationToken::new();
+        let cases = [
+            (IpsFamily::Rule, IpsWriteAction::Create, None, None),
+            (
+                IpsFamily::Signature,
+                IpsWriteAction::Create,
+                None,
+                Some("p1"),
+            ),
+            (IpsFamily::Profile, IpsWriteAction::Create, Some("u1"), None),
+            (IpsFamily::Profile, IpsWriteAction::Update, None, None),
+            (
+                IpsFamily::Profile,
+                IpsWriteAction::Delete,
+                Some("../x"),
+                None,
+            ),
+            (
+                IpsFamily::Rule,
+                IpsWriteAction::Delete,
+                Some("r1"),
+                Some("p1/../p2"),
+            ),
+        ];
+        for (family, action, uuid, profile_uuid) in cases {
+            let error = manager
+                .prepare_ips_write(
+                    "alice".to_owned(),
+                    family,
+                    action,
+                    uuid.map(str::to_owned),
+                    profile_uuid.map(str::to_owned),
+                    json!({"name": "x"}),
+                    &cancellation,
+                )
+                .await
+                .expect_err("mismatched arguments must be refused");
+            assert!(
+                matches!(
+                    error,
+                    SdcError::InvalidInput(_) | SdcError::InvalidIdentifier { .. }
+                ),
+                "{family:?} {action:?} produced {error:?}"
+            );
+        }
         server.abort();
     }
 

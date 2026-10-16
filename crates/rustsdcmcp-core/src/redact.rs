@@ -120,9 +120,82 @@ fn normalize_key(key: &str) -> String {
 #[must_use]
 pub fn redact_secrets(mut value: Value) -> Value {
     let diffs = take_config_diffs(&mut value);
+    let expressions = take_ips_expressions(&mut value);
     mecmcp_redact::redact_json_value_with_profile(&mut value, &PROFILE);
+    restore_ips_expressions(&mut value, expressions);
     restore_config_diffs(&mut value, diffs);
     value
+}
+
+/// JSON Pointers to the objects inside an IPS-write result that hold request
+/// or observed-state bodies, when `value` is such a result.
+///
+/// Two shapes are recognized, both produced only by the IPS write tools: the
+/// prepare result (`prepared_change` with `operation == "ips_write"`) and the
+/// apply result (`plan` with a string `family` and an `after` body). Matching
+/// the result shape, rather than any `pattern_sets` anywhere, keeps the read
+/// tools' redaction exactly as it was.
+fn ips_write_body_pointers(value: &Value) -> Vec<&'static str> {
+    let mut pointers = Vec::new();
+    if value
+        .pointer("/prepared_change/operation")
+        .and_then(Value::as_str)
+        == Some("ips_write")
+    {
+        pointers.extend(["/prepared_change/request", "/prepared_change/before"]);
+    }
+    let family_ok = matches!(
+        value.pointer("/plan/family").and_then(Value::as_str),
+        Some("signature" | "profile" | "rule" | "exempt_rule")
+    );
+    if family_ok && value.pointer("/plan/after").is_some() {
+        pointers.extend(["/plan/after", "/plan/before"]);
+    }
+    pointers
+}
+
+/// Pull signature `pattern_sets[].expression` strings out of an IPS-write
+/// result so the generic scan never sees them.
+///
+/// An expression is free text: SQL keywords, `password=`, `$`, newlines and
+/// shell metacharacters are normal in an attack pattern, and the shared
+/// crate's value-shape scan treats a `$...$` or multi-line string as a crypt
+/// hash or embedded blob and rewrites it (#238). The approver has to read the
+/// real pattern to approve it, so the expression is withheld from the scan and
+/// put back verbatim; the result also carries a digest of each expression.
+/// Every other field of the body is still scanned. An expression is a
+/// detection pattern, not a credential, and it is not scanned for secrets.
+fn take_ips_expressions(value: &mut Value) -> Vec<(String, String)> {
+    let mut taken = Vec::new();
+    for body in ips_write_body_pointers(value) {
+        let Some(sets) = value
+            .pointer_mut(&format!("{body}/pattern_sets"))
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for (index, set) in sets.iter_mut().enumerate() {
+            let Some(slot) = set.get_mut("expression") else {
+                continue;
+            };
+            if let Value::String(expression) = slot {
+                taken.push((
+                    format!("{body}/pattern_sets/{index}/expression"),
+                    std::mem::take(expression),
+                ));
+            }
+        }
+    }
+    taken
+}
+
+/// Put expressions removed by [`take_ips_expressions`] back, unscanned.
+fn restore_ips_expressions(value: &mut Value, expressions: Vec<(String, String)>) {
+    for (pointer, expression) in expressions {
+        if let Some(slot) = value.pointer_mut(&pointer) {
+            *slot = Value::String(expression);
+        }
+    }
 }
 
 /// Redact one `config_diff` body (the rendered firewall-policy preview or
@@ -715,6 +788,59 @@ pub fn apply_oob_drift(mut value: Value) -> Value {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+
+    /// #266: an approver must read the real signature expression. The generic
+    /// scan rewrites `$...$`-shaped and multi-line strings, so the IPS write
+    /// results carry expressions verbatim, while every other field is scanned.
+    #[test]
+    fn ips_write_results_keep_expressions_verbatim_and_redact_other_secrets() {
+        let expression = "$6$ABC.*password=admin\nsession=1; ' OR 1=1 --";
+        let body = serde_json::json!({
+            "name": "sig",
+            "password": "planted-secret-1",
+            "pattern_sets": [{"expression": expression, "community": "planted-secret-2"}],
+        });
+        let prepare = redact_secrets(serde_json::json!({
+            "prepared_change": {"operation": "ips_write", "request": body, "before": body},
+            "change_set": {"change_set_id": "cs-1"},
+        }));
+        let serialized = prepare.to_string();
+        assert!(!serialized.contains("planted-secret-1"), "{serialized}");
+        assert!(!serialized.contains("planted-secret-2"), "{serialized}");
+        for section in ["request", "before"] {
+            assert_eq!(
+                prepare["prepared_change"][section]["pattern_sets"][0]["expression"],
+                expression
+            );
+        }
+        let apply = redact_secrets(serde_json::json!({
+            "plan": {"family": "signature", "before": Value::Null, "after": body},
+        }));
+        assert_eq!(
+            apply["plan"]["after"]["pattern_sets"][0]["expression"],
+            expression
+        );
+        assert!(!apply.to_string().contains("planted-secret"));
+    }
+
+    /// The exemption is scoped to IPS write results: the same text on a read
+    /// tool's output is still scanned exactly as before.
+    #[test]
+    fn expressions_outside_ips_write_results_are_still_scanned() {
+        let scanned = redact_secrets(serde_json::json!({
+            "items": [{"pattern_sets": [{"expression": "$6$ABCdefGHI"}]}],
+            "prepared_change": {"operation": "object_write", "request":
+                {"pattern_sets": [{"expression": "$6$ABCdefGHI"}]}},
+        }));
+        assert_eq!(
+            scanned["items"][0]["pattern_sets"][0]["expression"],
+            REDACTED
+        );
+        assert_eq!(
+            scanned["prepared_change"]["request"]["pattern_sets"][0]["expression"],
+            REDACTED
+        );
+    }
     #[test]
     fn paging_tokens_survive_redaction() {
         // Percy B1 (MEC-440): the compound `*token` match redacted #172's

@@ -9,6 +9,23 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
+## Unreleased
+
+### Added
+
+- Change-controlled writes to IPS content (signatures, profiles, IPS rules, and
+  exempt rules) through one prepare/apply tool pair, with the same plan,
+  approval, and drift-checked apply flow as the other writes. Only custom
+  signatures can be changed or removed, a profile still attached to a firewall
+  rule cannot be deleted, and an IPS write changes SDC's model without
+  deploying anything to a device. Signature patterns are shown to the approver
+  unaltered, with a digest of each. (#266)
+
+### Documentation
+
+- Records that SDC deploys commit as commit-confirmed plus a confirm, which
+  moves the pre-deploy restore point on the device to `rollback 2`. (#266)
+
 ## `v0.3.1` — 2026-10-15
 
 ### Added

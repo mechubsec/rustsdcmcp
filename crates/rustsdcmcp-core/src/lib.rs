@@ -9,6 +9,7 @@ mod client;
 mod config;
 mod device_sync;
 mod firewall_write;
+mod ips_write;
 mod license_write;
 mod models;
 mod nat_write;
@@ -22,9 +23,9 @@ mod rule_write;
 
 pub use catalog::{ResourceKind, WritableResource};
 pub use change::{
-    ApplyResult, ChangeKind, ChangeManager, NatApplyResult, NatPrepareResult, ObjectApplyResult,
-    ObjectPrepareResult, PrepareResult, SdcTransaction, ValidationReport,
-    require_human_approval_for_oob,
+    ApplyResult, ChangeKind, ChangeManager, IpsApplyResult, IpsPrepareResult, NatApplyResult,
+    NatPrepareResult, ObjectApplyResult, ObjectPrepareResult, PrepareResult, SdcTransaction,
+    ValidationReport, require_human_approval_for_oob,
 };
 pub use client::{SdcClient, SdcError};
 pub use config::{AuthScheme, SdcConfig};
@@ -36,6 +37,10 @@ pub use device_sync::{
 pub use firewall_write::{
     FirewallApplyResult, FirewallPrepareResult, FirewallValidationReport, FirewallWriteOperation,
     SdcFirewallTransaction, SdcPreparedFirewallWrite,
+};
+pub use ips_write::{
+    ExpressionDigest, IpsFamily, IpsValidationReport, IpsWriteAction, SdcIpsTransaction,
+    SdcPreparedIpsWrite, expression_digests, is_custom_signature,
 };
 pub use license_write::{
     LicenseApplyResult, LicensePrepareResult, LicenseValidationReport, LicenseWriteOperation,
