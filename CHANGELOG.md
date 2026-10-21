@@ -11,6 +11,18 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 
 ## Unreleased
 
+### Fixed
+
+- IPS signature names are no longer rewritten by the generic redaction.
+  Juniper attack names such as `SNMP:COMMUNITY:…` or `HTTP:STC:PASSWORD-…`
+  read as `key: value` to the free-text scan and came back as
+  `SNMP:COMMUNITY[REDACTED]` or `HTTP:[REDACTED]`. `list_sdc_resources` /
+  `get_sdc_resource` for `ips_signatures` now return each signature's `name`
+  verbatim. The IPS rule and exempt-rule reads, and IPS write results and
+  change-set details, do the same for `ips_signature[].name` references and
+  for the name of a signature being written. Descriptions, rule and profile
+  names, and every other field are still redacted. (#277)
+
 ### Added
 
 - Change-controlled IPS writes: `prepare_sdc_ips_write` / `apply_sdc_ips_write`

@@ -65,7 +65,7 @@ pub use projection::{
 };
 pub use redact::{
     REDACTED, apply_oob_drift, contains_redaction_marker, redact_rma_state, redact_secrets,
-    redact_secrets_keeping_ips_patterns,
+    redact_secrets_keeping_ips_patterns, redact_secrets_keeping_ips_signature_names,
 };
 pub use rule_layout::{
     FirewallLayoutChange, FirewallLayoutRequest, FirewallRuleLayoutApplyResult,

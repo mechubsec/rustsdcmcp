@@ -24,6 +24,7 @@ use rustsdcmcp_core::{
     WritableResource, apply_oob_drift, page_list, page_paired_lists, project_ca_certificates,
     project_license, project_licenses, project_local_certificates, project_users_and_roles,
     redact_rma_state, redact_secrets, redact_secrets_keeping_ips_patterns,
+    redact_secrets_keeping_ips_signature_names,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -336,18 +337,55 @@ fn finish<T: Serialize>(mut audit: AuditScope, result: Result<T, SdcError>) -> C
 
 /// `finish`, for reads whose upstream shape may carry credentials.
 ///
-/// Every credential-bearing family goes through this, with no per-family
-/// exemption: the response is serialized to `Value` so `redact_secrets` can
-/// scan it regardless of the handler's return type. A serialization failure
-/// fails closed as [`SdcError::InvalidJson`] rather than falling back to the
-/// unredacted value.
+/// Every credential-bearing family goes through this or one of its IPS
+/// variants below: the response is serialized to `Value` so `redact_secrets`
+/// can scan it regardless of the handler's return type. A serialization
+/// failure fails closed as [`SdcError::InvalidJson`] rather than falling back
+/// to the unredacted value.
 fn finish_redacted<T: Serialize>(audit: AuditScope, result: Result<T, SdcError>) -> CallToolResult {
     finish_redacted_with(audit, result, redact_secrets)
 }
 
+/// [`finish_redacted`] for a read of IPS signatures themselves: each
+/// signature's own `name` comes back verbatim (#277).
+fn finish_redacted_ips_signatures<T: Serialize>(
+    audit: AuditScope,
+    result: Result<T, SdcError>,
+) -> CallToolResult {
+    finish_redacted_with(audit, result, |value| {
+        redact_secrets_keeping_ips_signature_names(value, true)
+    })
+}
+
+/// [`finish_redacted`] for IPS rule and exempt-rule reads: the
+/// `ips_signature[].name` references come back verbatim (#277).
+fn finish_redacted_ips_references<T: Serialize>(
+    audit: AuditScope,
+    result: Result<T, SdcError>,
+) -> CallToolResult {
+    finish_redacted_with(audit, result, |value| {
+        redact_secrets_keeping_ips_signature_names(value, false)
+    })
+}
+
+/// [`finish_redacted`] for `list_sdc_resources` / `get_sdc_resource`: only
+/// the `ips_signatures` family keeps its signature names.
+fn finish_redacted_resource<T: Serialize>(
+    audit: AuditScope,
+    resource: ResourceKind,
+    result: Result<T, SdcError>,
+) -> CallToolResult {
+    if resource == ResourceKind::IpsSignatures {
+        finish_redacted_ips_signatures(audit, result)
+    } else {
+        finish_redacted(audit, result)
+    }
+}
+
 /// [`finish_redacted`] for IPS write results and IPS change-set details: IPS
 /// detection patterns come back verbatim so an approver reads exactly what
-/// apply will send, and everything else is redacted as usual (#266).
+/// apply will send (#266), as do signature names (#277), and everything else
+/// is redacted as usual.
 fn finish_redacted_ips<T: Serialize>(
     audit: AuditScope,
     result: Result<T, SdcError>,
@@ -2949,7 +2987,7 @@ impl SdcHandler {
         let fields = (!args.fields.is_empty()).then_some(args.fields.as_slice());
         let result =
             self.paginate_list(result, "items", fields, args.continuation_token.as_deref());
-        Ok(finish_redacted(audit, result))
+        Ok(finish_redacted_resource(audit, args.resource, result))
     }
 
     #[tool(
@@ -2973,8 +3011,9 @@ impl SdcHandler {
             audit.deny("scope");
             return Ok(tool_error(error));
         }
-        Ok(finish_redacted(
+        Ok(finish_redacted_resource(
             audit,
+            args.resource,
             self.client
                 .get_resource(args.resource, &args.uuid, &cancellation)
                 .await,
@@ -3013,7 +3052,7 @@ impl SdcHandler {
             Err(error) => Err(error),
         };
         let result = self.paginate_list(result, "items", None, args.continuation_token.as_deref());
-        Ok(finish_redacted(audit, result))
+        Ok(finish_redacted_ips_references(audit, result))
     }
 
     #[tool(
@@ -3037,7 +3076,7 @@ impl SdcHandler {
             audit.deny("scope");
             return Ok(tool_error(error));
         }
-        Ok(finish_redacted(
+        Ok(finish_redacted_ips_references(
             audit,
             self.client
                 .get_ips_rule(&args.profile_uuid, &args.rule_uuid, &cancellation)
@@ -3077,7 +3116,7 @@ impl SdcHandler {
             Err(error) => Err(error),
         };
         let result = self.paginate_list(result, "items", None, args.continuation_token.as_deref());
-        Ok(finish_redacted(audit, result))
+        Ok(finish_redacted_ips_references(audit, result))
     }
 
     #[tool(
@@ -3101,7 +3140,7 @@ impl SdcHandler {
             audit.deny("scope");
             return Ok(tool_error(error));
         }
-        Ok(finish_redacted(
+        Ok(finish_redacted_ips_references(
             audit,
             self.client
                 .get_ips_exempt_rule(&args.profile_uuid, &args.rule_uuid, &cancellation)
@@ -4217,6 +4256,34 @@ mod tests {
             !plain.contains(r".*password=.*"),
             "read tools keep the generic scan"
         );
+    }
+
+    /// IPS signature reads keep signature names; every other resource family
+    /// keeps the generic scan over `name` (#277).
+    #[test]
+    fn ips_signature_reads_keep_names_while_other_families_do_not() {
+        let name = "SNMP:COMMUNITY:LONG-STRING";
+        let page = serde_json::json!({
+            "items": [{ "name": name, "api_key": "real-secret-value" }]
+        });
+        let render = |resource: ResourceKind, value: Value| {
+            let audit = AuditScope::new(Attribution::stdio(), "list_sdc_resources", "read", vec![]);
+            serde_json::to_string(&finish_redacted_resource(audit, resource, Ok(value)))
+                .expect("serializes")
+        };
+
+        let kept = render(ResourceKind::IpsSignatures, page.clone());
+        assert!(kept.contains(name), "{kept}");
+        assert!(!kept.contains("real-secret-value"), "{kept}");
+
+        let plain = render(ResourceKind::IpsProfiles, page);
+        assert!(!plain.contains(name), "{plain}");
+
+        let rule = serde_json::json!({ "ips_signature": [{ "uuid": "u", "name": name }] });
+        let audit = AuditScope::new(Attribution::stdio(), "get_sdc_ips_rule", "read", vec![]);
+        let kept = serde_json::to_string(&finish_redacted_ips_references(audit, Ok(rule)))
+            .expect("serializes");
+        assert!(kept.contains(name), "{kept}");
     }
 
     /// Fails closed: a value that cannot serialize to JSON must not fall back

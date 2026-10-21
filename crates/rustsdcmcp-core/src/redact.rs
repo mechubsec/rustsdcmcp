@@ -38,9 +38,12 @@
 //!
 //! ## Redaction policy
 //!
-//! `finish_redacted` is used for every read tool, with no per-family
-//! exemption; see `REDACTED_TOOLS` in `tests/tool_contract.rs` for the
-//! enforced, exhaustive list. Write tools (`prepare_*`/`apply_*`/
+//! `finish_redacted` is used for every read tool; see `REDACTED_TOOLS` in
+//! `tests/tool_contract.rs` for the enforced, exhaustive list. The one
+//! field-level exemption is IPS: detection patterns in IPS write results
+//! ([`redact_secrets_keeping_ips_patterns`]) and signature names in IPS reads
+//! and write results ([`redact_secrets_keeping_ips_signature_names`]) are
+//! identifiers the generic scan mistakes for `key: value` secrets. Write tools (`prepare_*`/`apply_*`/
 //! `approve_*`/`discard_*`) go through `finish_redacted` too: `prepare_*`
 //! results echo the raw upstream before-state in `prepared_change`, and
 //! `apply_*` results return a `plan: {before, after}`, so they carry the same
@@ -553,25 +556,151 @@ fn restore_config_diffs(value: &mut Value, diffs: Vec<(String, String)>) {
 const IPS_SET_PATTERN_KEYS: &[&str] = &["expression"];
 const IPS_MEMBER_PATTERN_KEYS: &[&str] = &["pattern", "regex"];
 
-/// [`redact_secrets`], except IPS detection patterns are returned verbatim.
+/// [`redact_secrets`], except IPS detection patterns and IPS signature names
+/// are returned verbatim.
 ///
 /// Used only for IPS write results and IPS change-set details, where an
 /// approver must read the exact pattern being approved: a redacted rendering
 /// would show something other than what apply sends. The stored action and
 /// the plan digest are never redacted either way. Every other field, including
-/// a secret sitting next to a pattern, is still redacted as usual. Read tools
-/// keep plain [`redact_secrets`].
+/// a secret sitting next to a pattern, is still redacted as usual. Signature
+/// names are kept for the reason [`redact_secrets_keeping_ips_signature_names`]
+/// gives: the name of the signature being written (`request`, `before` and
+/// `after` under `family: "signature"`) and every `ips_signature[].name`
+/// reference a rule write carries.
 #[must_use]
 pub fn redact_secrets_keeping_ips_patterns(mut value: Value) -> Value {
-    let mut patterns = Vec::new();
-    take_ips_patterns(&mut value, &mut String::new(), &mut patterns);
-    let mut value = redact_secrets(value);
-    for (parent, key, pattern) in patterns {
+    let mut kept = Vec::new();
+    take_ips_patterns(&mut value, &mut String::new(), &mut kept);
+    take_signature_references(&mut value, &mut String::new(), &mut kept);
+    take_written_signature_names(&mut value, &mut String::new(), &mut kept);
+    restore_kept(redact_secrets(value), kept)
+}
+
+/// [`redact_secrets`], except IPS signature names are returned verbatim.
+///
+/// An IPS signature name is an identifier, not a credential field, but
+/// Juniper's attack names are exactly the strings the generic line-oriented
+/// scan reads as `key: value`: `SNMP:COMMUNITY:…` became
+/// `SNMP:COMMUNITY[REDACTED]`, and `HTTP:STC:PASSWORD-…` became
+/// `HTTP:[REDACTED]`, so distinct signatures collapsed to one string and an
+/// IDP log could not be matched to its signature (#277).
+///
+/// `signature_objects` says whether the response *is* IPS signatures (a
+/// `get_sdc_resource` object, or the `items` of a `list_sdc_resources` page,
+/// for `ips_signatures`): their own top-level `name` is kept. Either way, every
+/// `ips_signature[].name` reference (IPS rules and exempt rules) is kept.
+/// Nothing else is exempt: a signature's `description`, a rule's own `name`,
+/// and every other field are scanned as usual.
+#[must_use]
+pub fn redact_secrets_keeping_ips_signature_names(
+    mut value: Value,
+    signature_objects: bool,
+) -> Value {
+    let mut kept = Vec::new();
+    if signature_objects {
+        take_signature_object_names(&mut value, &mut kept);
+    }
+    take_signature_references(&mut value, &mut String::new(), &mut kept);
+    restore_kept(redact_secrets(value), kept)
+}
+
+/// Splice fields lifted out by the `take_*` helpers back in after the generic
+/// scan, so it never saw them.
+fn restore_kept(mut value: Value, kept: Vec<(String, String, String)>) -> Value {
+    for (parent, key, field) in kept {
         if let Some(Value::Object(map)) = value.pointer_mut(&parent) {
-            map.insert(key, Value::String(pattern));
+            map.insert(key, Value::String(field));
         }
     }
     value
+}
+
+/// Lift the `name` of a signature object, or of each signature in a list
+/// page's `items`.
+fn take_signature_object_names(value: &mut Value, out: &mut Vec<(String, String, String)>) {
+    let Value::Object(map) = value else {
+        return;
+    };
+    if let Some(Value::Array(items)) = map.get_mut("items") {
+        for (index, item) in items.iter_mut().enumerate() {
+            if let Value::Object(item_map) = item {
+                take_string_fields(item_map, &format!("/items/{index}"), &["name"], out);
+            }
+        }
+    } else {
+        take_string_fields(map, "", &["name"], out);
+    }
+}
+
+/// Lift `name` from every `ips_signature[]` entry at any depth: the
+/// `{uuid, name}` signature references IPS rules and exempt rules carry.
+fn take_signature_references(
+    value: &mut Value,
+    pointer: &mut String,
+    out: &mut Vec<(String, String, String)>,
+) {
+    walk_objects(value, pointer, &mut |map, pointer| {
+        if let Some(Value::Array(references)) = map.get_mut("ips_signature") {
+            for (index, reference) in references.iter_mut().enumerate() {
+                if let Value::Object(reference_map) = reference {
+                    let parent = format!("{pointer}/ips_signature/{index}");
+                    take_string_fields(reference_map, &parent, &["name"], out);
+                }
+            }
+        }
+    });
+}
+
+/// Lift the `name` of the signature an IPS write targets: `request`, `before`
+/// and `after` of any object marked `family: "signature"` (the prepared
+/// change, and an apply result's `plan`).
+fn take_written_signature_names(
+    value: &mut Value,
+    pointer: &mut String,
+    out: &mut Vec<(String, String, String)>,
+) {
+    walk_objects(value, pointer, &mut |map, pointer| {
+        if map.get("family").and_then(Value::as_str) != Some("signature") {
+            return;
+        }
+        for side in ["request", "before", "after"] {
+            if let Some(Value::Object(signature)) = map.get_mut(side) {
+                take_string_fields(signature, &format!("{pointer}/{side}"), &["name"], out);
+            }
+        }
+    });
+}
+
+/// Call `visit` on every object in `value`, depth first, with its JSON
+/// Pointer. `visit` runs before the object's children are walked.
+fn walk_objects(
+    value: &mut Value,
+    pointer: &mut String,
+    visit: &mut dyn FnMut(&mut serde_json::Map<String, Value>, &str),
+) {
+    match value {
+        Value::Object(map) => {
+            visit(map, pointer);
+            for (key, child) in map.iter_mut() {
+                let mark = pointer.len();
+                pointer.push('/');
+                pointer.push_str(&key.replace('~', "~0").replace('/', "~1"));
+                walk_objects(child, pointer, visit);
+                pointer.truncate(mark);
+            }
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter_mut().enumerate() {
+                let mark = pointer.len();
+                pointer.push('/');
+                pointer.push_str(&index.to_string());
+                walk_objects(item, pointer, visit);
+                pointer.truncate(mark);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
 }
 
 /// Remove every string IPS pattern field under any `pattern_sets` array,
@@ -582,50 +711,32 @@ fn take_ips_patterns(
     pointer: &mut String,
     out: &mut Vec<(String, String, String)>,
 ) {
-    match value {
-        Value::Object(map) => {
-            if let Some(Value::Array(sets)) = map.get_mut("pattern_sets") {
-                for (set_index, set) in sets.iter_mut().enumerate() {
-                    let Value::Object(set_map) = set else {
-                        continue;
-                    };
-                    let set_pointer = format!("{pointer}/pattern_sets/{set_index}");
-                    take_string_fields(set_map, &set_pointer, IPS_SET_PATTERN_KEYS, out);
-                    if let Some(Value::Array(members)) = set_map.get_mut("pattern_members") {
-                        for (member_index, member) in members.iter_mut().enumerate() {
-                            if let Value::Object(member_map) = member {
-                                let member_pointer =
-                                    format!("{set_pointer}/pattern_members/{member_index}");
-                                take_string_fields(
-                                    member_map,
-                                    &member_pointer,
-                                    IPS_MEMBER_PATTERN_KEYS,
-                                    out,
-                                );
-                            }
-                        }
+    walk_objects(value, pointer, &mut |map, pointer| {
+        let Some(Value::Array(sets)) = map.get_mut("pattern_sets") else {
+            return;
+        };
+        for (set_index, set) in sets.iter_mut().enumerate() {
+            let Value::Object(set_map) = set else {
+                continue;
+            };
+            let set_pointer = format!("{pointer}/pattern_sets/{set_index}");
+            take_string_fields(set_map, &set_pointer, IPS_SET_PATTERN_KEYS, out);
+            if let Some(Value::Array(members)) = set_map.get_mut("pattern_members") {
+                for (member_index, member) in members.iter_mut().enumerate() {
+                    if let Value::Object(member_map) = member {
+                        let member_pointer =
+                            format!("{set_pointer}/pattern_members/{member_index}");
+                        take_string_fields(
+                            member_map,
+                            &member_pointer,
+                            IPS_MEMBER_PATTERN_KEYS,
+                            out,
+                        );
                     }
                 }
             }
-            for (key, child) in map.iter_mut() {
-                let mark = pointer.len();
-                pointer.push('/');
-                pointer.push_str(&key.replace('~', "~0").replace('/', "~1"));
-                take_ips_patterns(child, pointer, out);
-                pointer.truncate(mark);
-            }
         }
-        Value::Array(items) => {
-            for (index, item) in items.iter_mut().enumerate() {
-                let mark = pointer.len();
-                pointer.push('/');
-                pointer.push_str(&index.to_string());
-                take_ips_patterns(item, pointer, out);
-                pointer.truncate(mark);
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
-    }
+    });
 }
 
 fn take_string_fields(
@@ -1922,5 +2033,145 @@ mod tests {
             out["pattern_sets"][0]["pattern_members"][0]["notes"],
             "secret=x"
         );
+    }
+
+    /// Juniper-style attack names the generic scan mangles (#277). The first
+    /// reproduces the live `import_id` 6371 rendering,
+    /// `SNMP:COMMUNITY[REDACTED]`.
+    const NAMES_MANGLED_BY_GENERIC_SCAN: &[&str] = &[
+        "SNMP:COMMUNITY:LONG-STRING",
+        "SNMP:COMMUNITY-OVERFLOW",
+        "HTTP:STC:PASSWORD-LEAK",
+        "HTTP:INFO-LEAK:TOKEN-DISCLOSURE",
+        "HTTP:CISCO:SNMP-COMMUNITY",
+        "APP:SECRET:FOO",
+        "SSH:PRIVATE-KEY:BAR",
+    ];
+
+    fn signature(name: &str) -> Value {
+        serde_json::json!({
+            "uuid": "sig-1",
+            "name": name,
+            "description": "detects password=hunter2 in a login form",
+            "import_id": "6371",
+            "password": "hunter2-real-secret"
+        })
+    }
+
+    fn rule(name: &str) -> Value {
+        serde_json::json!({
+            "uuid": "rule-1",
+            "name": "token=rule-secret",
+            "ips_signature": [{ "uuid": "sig-1", "name": name }],
+            "then": { "action": "no-action" }
+        })
+    }
+
+    fn assert_still_redacted(object: &Value, context: &str) {
+        assert_eq!(object["password"], REDACTED, "{context} password key");
+        assert_ne!(
+            object["description"], "detects password=hunter2 in a login form",
+            "{context} description"
+        );
+    }
+
+    #[test]
+    fn the_generic_scan_really_does_mangle_signature_names() {
+        // Guards the tests below against passing vacuously.
+        for name in NAMES_MANGLED_BY_GENERIC_SCAN {
+            let out = redact_secrets(signature(name));
+            assert_ne!(out["name"], *name, "{name:?} is no longer mangled");
+            let out = redact_secrets(rule(name));
+            assert_ne!(out["ips_signature"][0]["name"], *name, "{name:?} reference");
+        }
+    }
+
+    #[test]
+    fn signature_names_survive_a_get_and_a_list_page() {
+        for name in NAMES_MANGLED_BY_GENERIC_SCAN {
+            let out = redact_secrets_keeping_ips_signature_names(signature(name), true);
+            assert_eq!(out["name"], *name, "get");
+            assert_still_redacted(&out, "get");
+
+            let page = serde_json::json!({
+                "items": [signature(name), signature("PLAIN-NAME")],
+                "continuation_token": null
+            });
+            let out = redact_secrets_keeping_ips_signature_names(page, true);
+            assert_eq!(out["items"][0]["name"], *name, "list");
+            assert_eq!(out["items"][1]["name"], "PLAIN-NAME", "list");
+            assert_still_redacted(&out["items"][0], "list");
+        }
+    }
+
+    #[test]
+    fn signature_references_survive_but_a_rule_name_is_still_scanned() {
+        for name in NAMES_MANGLED_BY_GENERIC_SCAN {
+            let page = serde_json::json!({ "items": [rule(name)] });
+            let out = redact_secrets_keeping_ips_signature_names(page, false);
+            let rule = &out["items"][0];
+            assert_eq!(rule["ips_signature"][0]["name"], *name);
+            assert_eq!(rule["ips_signature"][0]["uuid"], "sig-1");
+            assert_ne!(
+                rule["name"], "token=rule-secret",
+                "a rule's own name is not a signature name"
+            );
+        }
+    }
+
+    #[test]
+    fn a_top_level_name_is_kept_only_for_signature_objects() {
+        let out = redact_secrets_keeping_ips_signature_names(
+            serde_json::json!({ "name": "token=not-a-signature" }),
+            false,
+        );
+        assert_ne!(out["name"], "token=not-a-signature");
+        let out = redact_secrets_keeping_ips_signature_names(
+            serde_json::json!({ "name": 42, "items": "not-an-array" }),
+            true,
+        );
+        assert_eq!(out["name"], 42);
+    }
+
+    #[test]
+    fn ips_write_results_keep_the_written_signature_name_and_references() {
+        for name in NAMES_MANGLED_BY_GENERIC_SCAN {
+            let signature_write = serde_json::json!({
+                "prepared_change": {
+                    "family": "signature",
+                    "request": signature(name),
+                    "before": signature(name)
+                },
+                "plan": { "family": "signature", "after": signature(name) }
+            });
+            let out = redact_secrets_keeping_ips_patterns(signature_write);
+            for pointer in [
+                "/prepared_change/request",
+                "/prepared_change/before",
+                "/plan/after",
+            ] {
+                let object = out.pointer(pointer).expect("object");
+                assert_eq!(object["name"], *name, "{pointer}");
+                assert_still_redacted(object, pointer);
+            }
+
+            let rule_write = serde_json::json!({
+                "family": "rule",
+                "request": rule(name),
+                "before": null
+            });
+            let out = redact_secrets_keeping_ips_patterns(rule_write);
+            assert_eq!(out["request"]["ips_signature"][0]["name"], *name);
+            assert_ne!(out["request"]["name"], "token=rule-secret");
+        }
+    }
+
+    #[test]
+    fn a_profile_write_name_is_still_scanned() {
+        let out = redact_secrets_keeping_ips_patterns(serde_json::json!({
+            "family": "profile",
+            "request": { "name": "token=profile-secret" }
+        }));
+        assert_ne!(out["request"]["name"], "token=profile-secret");
     }
 }
