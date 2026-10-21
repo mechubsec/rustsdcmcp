@@ -9,7 +9,12 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
-## Unreleased
+## `v0.4.0` — 2026-10-21
+
+### Security
+
+- Bumps `rustls-webpki` to 0.103.16 and `webpki-root-certs` to 1.0.10 for
+  RUSTSEC-2026-0382 and RUSTSEC-2026-0383. (#280)
 
 ### Fixed
 
