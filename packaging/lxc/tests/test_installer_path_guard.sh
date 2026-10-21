@@ -43,7 +43,7 @@ chmod +x "$FAKE_PACKAGE/bin/rustsdcmcp" "$FAKE_PACKAGE/packaging/lxc/install.sh"
 binary_sha256=$(sha256sum "$FAKE_PACKAGE/bin/rustsdcmcp" | cut -d' ' -f1)
 cat >"$FAKE_PACKAGE/BUILD-INFO" <<EOF
 release_status=release
-version=0.3.1
+version=0.4.0
 git_commit=$(printf '%040d' 0)
 source_date_epoch=1700000000
 target=x86_64-unknown-linux-gnu
