@@ -441,11 +441,12 @@ when the token is minted. `mecmcp-auth` enforces this — a wildcard scope is
 defined as "everything except the server's declared write tools" — so there is
 no token scope that grants mutation implicitly.
 
-### IPS signature, profile and rule writes
+### IPS signature, profile, rule and exempt-rule writes
 
 `prepare_sdc_ips_write` / `apply_sdc_ips_write` create, update and delete custom
 IPS signatures (`family: signature`), IPS profiles (`family: profile`) and IPS rules
-inside a profile (`family: rule`, with `profile_uuid`). They are
+inside a profile (`family: rule`, with `profile_uuid`) and IPS exempt rules inside a
+profile (`family: exempt_rule`, with `profile_uuid`). They are
 a separate grant from `prepare_sdc_object_write`, so name both tools explicitly
 when minting a token that should author IPS content.
 
@@ -470,7 +471,7 @@ when minting a token that should author IPS content.
 - **SDC only.** A completed IPS write changes SDC's model. It reaches a device
   only when a firewall policy whose rule references the profile is deployed
   through `prepare_sdc_policy_deploy` → approve → `apply_sdc_change_set`.
-- **No zone or address scoping inside IPS rules.** SDC's IPS rule model has no
+- **No zone or address scoping inside IPS rules or exempt rules.** SDC's IPS rule model has no
   match zones, source, or destination. A device-imported IDP policy whose rules
   matched specific zones and a host was rewritten to `any`/`any`/`any` on the
   next policy deploy (lab tenant, vSRX 24.4R2.21, 2026-10-13). In SDC, scope
@@ -479,6 +480,10 @@ when minting a token that should author IPS content.
   only `name` and `description`; a rule references signatures by UUID in
   `ips_signature` and needs `then.action` (for example `no-action`). Prepare
   refuses a rule unless its profile and every referenced signature exist.
+- **An exempt rule exempts signatures from the profile's rules.** It takes the
+  same `name` and `ips_signature` list as a rule but no `then`; a body carrying
+  `then` is refused. Prepare applies the same profile and signature existence
+  checks, and apply the same drift check, as for a rule.
 - **Delete is refused while anything still references the target.** Prepare
   scans before planning a delete and names up to 20 referrers:
   - a profile: every firewall policy's global and zone rules
@@ -489,13 +494,12 @@ when minting a token that should author IPS content.
     a signature group is not scanned, because finding it means reading the
     whole signature catalogue (tens of thousands of entries); SDC's own `409`
     is the backstop there.
-  - a rule: nothing; rules are leaves.
+  - a rule or exempt rule: nothing; they are leaves.
 
   A scan is capped at 500 SDC reads. One that cannot finish inside that budget
   refuses the delete rather than passing on a partial read. The scan runs at
   prepare only, so a reference added between approval and apply is left to
   SDC's `409`. A delete sends no body.
-- **Not yet in this path:** exempt-rule writes (#266).
 
 ### SDC commits twice per deploy
 

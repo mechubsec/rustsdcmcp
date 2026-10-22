@@ -68,39 +68,53 @@ pub enum IpsWriteFamily {
     /// signatures are added to a profile: a profile body carries only `name`
     /// and `description`.
     Rule,
+    /// An IPS exempt rule inside one IPS profile
+    /// (`/api/v1/ips_profiles/{profile_uuid}/exempt_rules`). It exempts the
+    /// referenced signatures from the profile's rules, so it has no `then`.
+    ExemptRule,
 }
 
 impl IpsWriteFamily {
     /// Every writable IPS family, for exhaustive iteration in tests.
-    pub const ALL: &'static [Self] = &[Self::Signature, Self::Profile, Self::Rule];
+    pub const ALL: &'static [Self] =
+        &[Self::Signature, Self::Profile, Self::Rule, Self::ExemptRule];
 
     /// The flat read family used for before-state and drift detection, or
-    /// `None` for a rule, which is read through its parent profile.
+    /// `None` for a rule or exempt rule, which is read through its parent
+    /// profile.
     #[must_use]
     pub const fn resource_kind(self) -> Option<ResourceKind> {
         match self {
             Self::Signature => Some(ResourceKind::IpsSignatures),
             Self::Profile => Some(ResourceKind::IpsProfiles),
-            Self::Rule => None,
+            Self::Rule | Self::ExemptRule => None,
         }
     }
 
     /// Whether this family lives under a parent IPS profile.
     #[must_use]
     pub const fn requires_profile(self) -> bool {
-        matches!(self, Self::Rule)
+        matches!(self, Self::Rule | Self::ExemptRule)
     }
 
     /// Exact collection path segments. Flat families delegate to the read
     /// catalog, so a write and its drift-detection read can never address
     /// different paths; a rule's collection is the same one
-    /// `list_sdc_ips_rules` reads. `None` when the parent profile is missing
-    /// for a rule, or supplied for a flat family.
+    /// `list_sdc_ips_rules` reads, an exempt rule's the one
+    /// `list_sdc_ips_exempt_rules` reads. `None` when the parent profile is
+    /// missing for a rule or exempt rule, or supplied for a flat family.
     #[must_use]
     pub fn collection_segments(self, profile_uuid: Option<&str>) -> Option<Vec<&str>> {
         match (self.resource_kind(), profile_uuid) {
             (Some(kind), None) => Some(kind.collection_segments().to_vec()),
-            (None, Some(profile)) => Some(vec!["api", "v1", "ips_profiles", profile, "ips_rules"]),
+            (None, Some(profile)) => {
+                let leaf = if self == Self::ExemptRule {
+                    "exempt_rules"
+                } else {
+                    "ips_rules"
+                };
+                Some(vec!["api", "v1", "ips_profiles", profile, leaf])
+            }
             (Some(_), Some(_)) | (None, None) => None,
         }
     }
@@ -110,11 +124,11 @@ impl IpsWriteFamily {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum IpsWriteAction {
-    /// Create a new signature, profile, or rule.
+    /// Create a new signature, profile, rule, or exempt rule.
     Create,
-    /// Replace an existing signature, profile, or rule by UUID.
+    /// Replace an existing signature, profile, rule, or exempt rule by UUID.
     Update,
-    /// Remove an existing signature, profile, or rule by UUID.
+    /// Remove an existing signature, profile, rule, or exempt rule by UUID.
     Delete,
 }
 
@@ -193,6 +207,30 @@ impl SdcPreparedIpsWrite {
         Self::build(
             action,
             IpsWriteFamily::Rule,
+            Some(profile_uuid),
+            uuid,
+            request,
+            before,
+        )
+    }
+
+    /// Build a canonical, digest-bound IPS exempt-rule write inside
+    /// `profile_uuid`.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::new`] refuses, plus an exempt-rule body without at
+    /// least one well-formed `ips_signature` reference or carrying a `then`.
+    pub fn new_exempt_rule(
+        action: IpsWriteAction,
+        profile_uuid: String,
+        uuid: Option<String>,
+        request: Value,
+        before: Value,
+    ) -> Result<Self, SdcError> {
+        Self::build(
+            action,
+            IpsWriteFamily::ExemptRule,
             Some(profile_uuid),
             uuid,
             request,
@@ -344,14 +382,14 @@ impl SdcPreparedIpsWrite {
             (true, Some(profile)) if is_allowed_identifier(profile) => {}
             (true, _) => {
                 return Err(SdcError::PreparedChange(
-                    "an IPS rule write requires a profile_uuid of 1-256 characters from \
+                    "an IPS rule or exempt-rule write requires a profile_uuid of 1-256 characters from \
                      [A-Za-z0-9_-:+=]"
                         .to_owned(),
                 ));
             }
             (false, Some(_)) => {
                 return Err(SdcError::PreparedChange(
-                    "profile_uuid applies only to IPS rule writes".to_owned(),
+                    "profile_uuid applies only to IPS rule and exempt-rule writes".to_owned(),
                 ));
             }
             (false, None) => {}
@@ -425,6 +463,7 @@ impl SdcPreparedIpsWrite {
         };
         match self.family {
             IpsWriteFamily::Rule => validate_rule_body(fields)?,
+            IpsWriteFamily::ExemptRule => validate_exempt_rule_body(fields)?,
             IpsWriteFamily::Profile if !is_valid_profile_name(name) => {
                 return Err(SdcError::PreparedChange(
                     "IPS profile name must be 1-127 characters with no space, `#`, `&`, `;`, \
@@ -532,17 +571,20 @@ fn plan_artifact(
 /// Upper bound on signatures referenced by one rule.
 const MAX_RULE_SIGNATURES: usize = 256;
 
-/// A rule body must reference at least one signature by a well-formed UUID
-/// and carry a `then.action`. `IPSRuleInput` requires `name`, `ips_signature`
-/// and `then`; the spec leaves `then` fields unconstrained, so only `action`
-/// is required here, as SDC's own rules always carry one.
-fn validate_rule_body(fields: &serde_json::Map<String, Value>) -> Result<(), SdcError> {
-    let refused = |reason: &str| Err(SdcError::PreparedChange(reason.to_owned()));
+/// Shared by rules and exempt rules: 1-256 `ips_signature` references, each
+/// with a well-formed `uuid`. `what` names the family in the refusal.
+fn validate_signature_references(
+    fields: &serde_json::Map<String, Value>,
+    what: &str,
+) -> Result<(), SdcError> {
+    let refused = |reason: String| Err(SdcError::PreparedChange(reason));
     let Some(Value::Array(references)) = fields.get("ips_signature") else {
-        return refused("an IPS rule body requires an `ips_signature` array");
+        return refused(format!("an {what} body requires an `ips_signature` array"));
     };
     if references.is_empty() || references.len() > MAX_RULE_SIGNATURES {
-        return refused("an IPS rule must reference 1-256 signatures in `ips_signature`");
+        return refused(format!(
+            "an {what} must reference 1-256 signatures in `ips_signature`"
+        ));
     }
     for reference in references {
         if !reference
@@ -552,17 +594,41 @@ fn validate_rule_body(fields: &serde_json::Map<String, Value>) -> Result<(), Sdc
         {
             return refused(
                 "every `ips_signature` entry needs a `uuid` of 1-256 characters from \
-                 [A-Za-z0-9_-:+=]",
+                 [A-Za-z0-9_-:+=]"
+                    .to_owned(),
             );
         }
     }
+    Ok(())
+}
+
+/// A rule body must reference at least one signature by a well-formed UUID
+/// and carry a `then.action`. `IPSRuleInput` requires `name`, `ips_signature`
+/// and `then`; the spec leaves `then` fields unconstrained, so only `action`
+/// is required here, as SDC's own rules always carry one.
+fn validate_rule_body(fields: &serde_json::Map<String, Value>) -> Result<(), SdcError> {
+    validate_signature_references(fields, "IPS rule")?;
     if !fields
         .get("then")
         .and_then(|then| then.get("action"))
         .and_then(Value::as_str)
         .is_some_and(|action| !action.trim().is_empty())
     {
-        return refused("an IPS rule body requires `then.action`");
+        return Err(SdcError::PreparedChange(
+            "an IPS rule body requires `then.action`".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// An exempt-rule body references signatures like a rule but takes no `then`:
+/// the action is "exempt", so a `then` is refused rather than silently sent.
+fn validate_exempt_rule_body(fields: &serde_json::Map<String, Value>) -> Result<(), SdcError> {
+    validate_signature_references(fields, "IPS exempt rule")?;
+    if fields.contains_key("then") {
+        return Err(SdcError::PreparedChange(
+            "an IPS exempt rule body must not carry `then`".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -839,7 +905,7 @@ pub async fn find_signature_references(
 
 /// Refuse deleting a profile or signature that is still referenced.
 ///
-/// Rules are leaves, so a rule delete needs no scan.
+/// Rules and exempt rules are leaves, so a rule delete needs no scan.
 ///
 /// # Errors
 ///
@@ -859,7 +925,7 @@ pub async fn ensure_unreferenced(
             &format!("IPS signature {uuid}"),
             &find_signature_references(client, uuid, cancellation).await?,
         ),
-        IpsWriteFamily::Rule => Ok(()),
+        IpsWriteFamily::Rule | IpsWriteFamily::ExemptRule => Ok(()),
     }
 }
 
@@ -1188,6 +1254,112 @@ mod tests {
             Some(vec!["api", "v1", "ips_profiles", "p-1", "ips_rules"])
         );
         assert_eq!(json!(IpsWriteFamily::Rule), json!("rule"));
+        // An exempt rule's collection is the one list_sdc_ips_exempt_rules reads.
+        assert_eq!(IpsWriteFamily::ExemptRule.resource_kind(), None);
+        assert!(IpsWriteFamily::ExemptRule.requires_profile());
+        assert_eq!(IpsWriteFamily::ExemptRule.collection_segments(None), None);
+        assert_eq!(
+            IpsWriteFamily::ExemptRule.collection_segments(Some("p-1")),
+            Some(vec!["api", "v1", "ips_profiles", "p-1", "exempt_rules"])
+        );
+        assert_eq!(json!(IpsWriteFamily::ExemptRule), json!("exempt_rule"));
+    }
+
+    fn exempt_rule_body() -> Value {
+        json!({
+            "name": "CUSTOM-EXEMPT",
+            "ips_signature": [
+                { "uuid": "8ad65be9-3307-4763-b21e-5cf15b3f4653", "name": "CUSTOM-A" }
+            ]
+        })
+    }
+
+    /// Adding a family must not move the digest of an existing envelope.
+    #[test]
+    fn signature_and_rule_digests_are_pinned() {
+        let signature = SdcPreparedIpsWrite::new(
+            IpsWriteAction::Create,
+            IpsWriteFamily::Signature,
+            None,
+            json!({ "name": "CUSTOM-X" }),
+            Value::Null,
+        )
+        .expect("signature");
+        let rule = SdcPreparedIpsWrite::new_rule(
+            IpsWriteAction::Create,
+            "p-1".to_owned(),
+            None,
+            rule_body(),
+            Value::Null,
+        )
+        .expect("rule");
+        assert_eq!(
+            signature.plan_digest(),
+            "sha256:126c123405f600cdab025deae326b157ff7ebe5b82e8a94f2185188d1b04d932"
+        );
+        assert_eq!(
+            rule.plan_digest(),
+            "sha256:d985a0501640fd458589187a981881f8503a1cea46275d41458539b0641ea43e"
+        );
+    }
+
+    #[test]
+    fn an_exempt_rule_body_needs_signatures_and_refuses_then() {
+        let build = |body: Value| {
+            SdcPreparedIpsWrite::new_exempt_rule(
+                IpsWriteAction::Create,
+                "p-1".to_owned(),
+                None,
+                body,
+                Value::Null,
+            )
+        };
+        let created = build(exempt_rule_body()).expect("valid exempt rule");
+        assert_eq!(created.family(), IpsWriteFamily::ExemptRule);
+        assert_eq!(created.profile_uuid(), Some("p-1"));
+
+        let mut missing = exempt_rule_body();
+        missing
+            .as_object_mut()
+            .expect("object")
+            .remove("ips_signature");
+        assert!(build(missing).is_err());
+        for references in [
+            json!([]),
+            json!([{ "name": "no uuid" }]),
+            json!([{ "uuid": "../escape" }]),
+        ] {
+            let mut body = exempt_rule_body();
+            body["ips_signature"] = references.clone();
+            assert!(build(body).is_err(), "{references} accepted");
+        }
+        let mut with_then = exempt_rule_body();
+        with_then["then"] = json!({ "action": "no-action" });
+        let error = build(with_then).expect_err("then is refused");
+        assert!(error.to_string().contains("must not carry `then`"));
+        // A rule body is not an exempt-rule body, and vice versa.
+        assert!(build(rule_body()).is_err());
+        assert!(
+            SdcPreparedIpsWrite::new_rule(
+                IpsWriteAction::Create,
+                "p-1".to_owned(),
+                None,
+                exempt_rule_body(),
+                Value::Null,
+            )
+            .is_err()
+        );
+        // Needs its profile, like a rule.
+        assert!(
+            SdcPreparedIpsWrite::new(
+                IpsWriteAction::Create,
+                IpsWriteFamily::ExemptRule,
+                None,
+                exempt_rule_body(),
+                Value::Null,
+            )
+            .is_err()
+        );
     }
 
     fn rule_body() -> Value {

@@ -1236,7 +1236,7 @@ pub struct ApplyObjectArgs {
     pub change_ref: Option<String>,
 }
 
-/// Arguments for planning one IPS signature or profile write.
+/// Arguments for planning one IPS signature, profile, rule, or exempt-rule write.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PrepareIpsArgs {
@@ -1248,19 +1248,22 @@ pub struct PrepareIpsArgs {
     /// (`/api/v1/ips_signatures`); `profile` for an IPS profile
     /// (`/api/v1/ips_profiles`); `rule` for an IPS rule inside a profile
     /// (`/api/v1/ips_profiles/{profile_uuid}/ips_rules`), which is how
-    /// signatures are added to a profile.
+    /// signatures are added to a profile; `exempt_rule` for an IPS exempt rule
+    /// inside a profile (`/api/v1/ips_profiles/{profile_uuid}/exempt_rules`),
+    /// which exempts the referenced signatures from the profile's rules.
     pub family: IpsWriteFamily,
-    /// Parent IPS profile UUID. Required for `rule`, rejected otherwise.
+    /// Parent IPS profile UUID. Required for `rule` and `exempt_rule`, rejected otherwise.
     #[serde(default)]
     pub profile_uuid: Option<String>,
     /// Target UUID. Required for update and delete, absent for create.
     #[serde(default)]
     pub uuid: Option<String>,
-    /// Full object definition, as the `IpsSignatureInput`, `IpsProfileInput`
-    /// or `IPSRuleInput` schema describes it. Required for create and update,
+    /// Full object definition, as the `IpsSignatureInput`, `IpsProfileInput`,
+    /// `IPSRuleInput` or `IPSExemptRuleInput` schema describes it. Required for create and update,
     /// absent for delete. Must include `name`. A rule also needs
     /// `ips_signature: [{"uuid": …, "name": …}]` and `then.action` (for
     /// example `no-action`, `recommended`, `close-client-and-server`). An
+    /// exempt rule needs the same `ips_signature` list and no `then`. An
     /// update replaces the whole object, so send every field to keep.
     #[serde(default)]
     pub body: Option<Value>,
@@ -3700,7 +3703,7 @@ impl SdcHandler {
 
     #[tool(
         name = "prepare_sdc_ips_write",
-        description = "Plan one custom IPS signature, IPS profile, or IPS rule create, update, or delete and create a digest-bound change set. This does not write. Signatures are added to a profile by creating a rule (family `rule`, with `profile_uuid`) that references them; the profile and every referenced signature must already exist. Predefined signatures (those with an import_id or activation_date from the signature bundle) are refused. Deleting a profile still referenced by a firewall rule or global setting, or a signature still referenced by an IPS or exempt rule, is refused with the referrers named. SDC IPS rules carry no zone or address match: scope comes from the firewall rule the profile is attached to. A completed write changes SDC only; nothing reaches a device until a policy using it is deployed."
+        description = "Plan one custom IPS signature, IPS profile, IPS rule, or IPS exempt rule create, update, or delete and create a digest-bound change set. This does not write. Signatures are added to a profile by creating a rule (family `rule`, with `profile_uuid`) that references them, and an exempt rule (family `exempt_rule`, with `profile_uuid`, no `then`) exempts the signatures it references from the profile's rules; the profile and every referenced signature must already exist. Predefined signatures (those with an import_id or activation_date from the signature bundle) are refused. Deleting a profile still referenced by a firewall rule or global setting, or a signature still referenced by an IPS or exempt rule, is refused with the referrers named. SDC IPS rules and exempt rules carry no zone or address match: scope comes from the firewall rule the profile is attached to. A completed write changes SDC only; nothing reaches a device until a policy using it is deployed."
     )]
     async fn prepare_sdc_ips_write(
         &self,
@@ -3737,7 +3740,7 @@ impl SdcHandler {
 
     #[tool(
         name = "apply_sdc_ips_write",
-        description = "Apply only an independently approved SDC IPS signature, profile, or rule write, refusing it if the target changed since it was planned. This changes SDC only; deploy a policy to reach devices."
+        description = "Apply only an independently approved SDC IPS signature, profile, rule, or exempt-rule write, refusing it if the target changed since it was planned. This changes SDC only; deploy a policy to reach devices."
     )]
     async fn apply_sdc_ips_write(
         &self,
@@ -4535,6 +4538,16 @@ mod tests {
         assert_eq!(rule.family, IpsWriteFamily::Rule);
         assert_eq!(rule.profile_uuid.as_deref(), Some("p-1"));
 
+        let exempt: PrepareIpsArgs = serde_json::from_value(serde_json::json!({
+            "tenant": "production",
+            "action": "create",
+            "family": "exempt_rule",
+            "profile_uuid": "p-1",
+            "body": {"name": "E", "ips_signature": [{"uuid": "s-1"}]}
+        }))
+        .expect("exempt rule create");
+        assert_eq!(exempt.family, IpsWriteFamily::ExemptRule);
+
         // Delete carries no body; whether a body is required is enforced at
         // prepare, per action, not by the argument schema.
         let delete: PrepareIpsArgs = serde_json::from_value(serde_json::json!({
@@ -4549,7 +4562,7 @@ mod tests {
 
         for bad in [
             serde_json::json!({"tenant": "production", "action": "remove", "family": "signature", "uuid": "s-1"}),
-            serde_json::json!({"tenant": "production", "action": "create", "family": "exempt_rule", "body": {"name": "X"}}),
+            serde_json::json!({"tenant": "production", "action": "create", "family": "address", "body": {"name": "X"}}),
             serde_json::json!({"tenant": "production", "action": "create", "family": "profile", "body": {"name": "X"}, "resource": "addresses"}),
         ] {
             assert!(

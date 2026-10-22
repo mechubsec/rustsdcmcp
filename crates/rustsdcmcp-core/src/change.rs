@@ -664,7 +664,7 @@ impl ChangeManager {
     ) -> Result<IpsPrepareResult, SdcError> {
         if family.requires_profile() != profile_uuid.is_some() {
             return Err(SdcError::InvalidInput(
-                "family `rule` requires profile_uuid; `signature` and `profile` take none",
+                "families `rule` and `exempt_rule` require profile_uuid; `signature` and `profile` take none",
             ));
         }
         let before = match (action, uuid.as_deref()) {
@@ -689,6 +689,9 @@ impl ChangeManager {
             return Err(SdcError::InvalidInput("delete takes no body"));
         }
         let prepared = match profile_uuid {
+            Some(profile) if family == IpsWriteFamily::ExemptRule => {
+                SdcPreparedIpsWrite::new_exempt_rule(action, profile, uuid, request, before)?
+            }
             Some(profile) => SdcPreparedIpsWrite::new_rule(action, profile, uuid, request, before)?,
             None => SdcPreparedIpsWrite::new(action, family, uuid, request, before)?,
         };
@@ -5242,6 +5245,214 @@ mod tests {
         assert_eq!(sent[0].0, "DELETE");
         assert_eq!(sent[0].1, "/api/v1/ips_profiles/p-1/ips_rules/r-1");
         assert!(sent[0].2.is_null(), "a delete sends no body");
+        server.abort();
+    }
+
+    fn exempt_rule_body() -> Value {
+        json!({
+            "name": "CUSTOM-EXEMPT",
+            "ips_signature": [
+                { "uuid": "sig-a", "name": "CUSTOM-A" },
+                { "uuid": "sig-b", "name": "CUSTOM-B" }
+            ]
+        })
+    }
+
+    #[tokio::test]
+    async fn an_ips_exempt_rule_create_is_posted_under_its_profile() {
+        let (base_url, server, seen) = ips_server(
+            Arc::new(std::sync::Mutex::new(
+                json!({"uuid": "exists", "name": "x"}),
+            )),
+            axum::http::StatusCode::OK,
+            json!({"uuid": "x-new", "name": "CUSTOM-EXEMPT"}),
+        )
+        .await;
+        let (manager, _) = ips_manager(&base_url);
+
+        let prepared = manager
+            .prepare_ips_write(
+                "alice".to_owned(),
+                IpsWriteAction::Create,
+                IpsWriteFamily::ExemptRule,
+                Some("p-1".to_owned()),
+                None,
+                exempt_rule_body(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("prepare");
+        assert_eq!(
+            reads(&seen),
+            vec![
+                "/api/v1/ips_profiles/p-1".to_owned(),
+                "/api/v1/ips_signatures/sig-a".to_owned(),
+                "/api/v1/ips_signatures/sig-b".to_owned(),
+            ],
+            "prepare must confirm the profile and every referenced signature exist"
+        );
+        let applied = approve_and_apply_ips(&manager, prepared)
+            .await
+            .expect("apply");
+        assert_eq!(applied.created_uuid.as_deref(), Some("x-new"));
+        assert_eq!(applied.validation.family, IpsWriteFamily::ExemptRule);
+        let sent = writes(&seen);
+        assert_eq!(sent.len(), 1, "exactly one write: {sent:?}");
+        assert_eq!(sent[0].0, "POST");
+        assert_eq!(sent[0].1, "/api/v1/ips_profiles/p-1/exempt_rules");
+        assert_eq!(sent[0].2, exempt_rule_body());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_ips_exempt_rule_update_and_delete_use_the_exempt_rules_path() {
+        let existing = json!({
+            "uuid": "x-1",
+            "name": "CUSTOM-EXEMPT",
+            "ips_signature": [{ "uuid": "sig-a", "name": "CUSTOM-A" }]
+        });
+        let (base_url, server, seen) = ips_server(
+            Arc::new(std::sync::Mutex::new(existing.clone())),
+            axum::http::StatusCode::OK,
+            json!({"uuid": "x-1"}),
+        )
+        .await;
+        let (manager, _) = ips_manager(&base_url);
+
+        let update = manager
+            .prepare_ips_write(
+                "alice".to_owned(),
+                IpsWriteAction::Update,
+                IpsWriteFamily::ExemptRule,
+                Some("p-1".to_owned()),
+                Some("x-1".to_owned()),
+                exempt_rule_body(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("prepare update");
+        assert_eq!(update.prepared_change.before(), &existing);
+        assert_eq!(reads(&seen)[0], "/api/v1/ips_profiles/p-1/exempt_rules/x-1");
+        approve_and_apply_ips(&manager, update)
+            .await
+            .expect("apply update");
+
+        let delete = manager
+            .prepare_ips_write(
+                "alice".to_owned(),
+                IpsWriteAction::Delete,
+                IpsWriteFamily::ExemptRule,
+                Some("p-1".to_owned()),
+                Some("x-1".to_owned()),
+                Value::Null,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("prepare delete");
+        approve_and_apply_ips(&manager, delete)
+            .await
+            .expect("apply delete");
+
+        let sent = writes(&seen);
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert_eq!(sent[0].0, "PUT");
+        assert_eq!(sent[0].1, "/api/v1/ips_profiles/p-1/exempt_rules/x-1");
+        assert_eq!(sent[0].2, exempt_rule_body());
+        assert_eq!(sent[1].0, "DELETE");
+        assert_eq!(sent[1].1, "/api/v1/ips_profiles/p-1/exempt_rules/x-1");
+        assert!(sent[1].2.is_null());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_exempt_rule_with_a_missing_profile_signature_or_pairing_is_refused_at_prepare() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let seen: Seen = Arc::default();
+        let log = seen.clone();
+        let app =
+            Router::new().fallback(move |method: axum::http::Method, uri: axum::http::Uri| {
+                let log = log.clone();
+                async move {
+                    let path = uri.path().to_owned();
+                    log.lock()
+                        .expect("log")
+                        .push((method.to_string(), path.clone(), Value::Null));
+                    if path.ends_with("/sig-b") || path == "/api/v1/ips_profiles/gone" {
+                        (axum::http::StatusCode::NOT_FOUND, Json(json!({})))
+                    } else {
+                        (axum::http::StatusCode::OK, Json(json!({"uuid": "exists"})))
+                    }
+                }
+            });
+        let (base_url, server) = serve(app).await;
+        let (manager, _) = ips_manager(&base_url);
+        let cancellation = CancellationToken::new();
+        let prepare = |family, profile: Option<&str>| {
+            manager.prepare_ips_write(
+                "alice".to_owned(),
+                IpsWriteAction::Create,
+                family,
+                profile.map(str::to_owned),
+                None,
+                exempt_rule_body(),
+                &cancellation,
+            )
+        };
+
+        prepare(IpsWriteFamily::ExemptRule, Some("gone"))
+            .await
+            .expect_err("a missing profile must not be planned");
+        prepare(IpsWriteFamily::ExemptRule, Some("p-1"))
+            .await
+            .expect_err("a dangling signature reference must not be planned");
+        assert!(writes(&seen).is_empty());
+
+        let before = seen.lock().expect("log").len();
+        prepare(IpsWriteFamily::ExemptRule, None)
+            .await
+            .expect_err("an exempt rule needs its profile");
+        prepare(IpsWriteFamily::Profile, Some("p-1"))
+            .await
+            .expect_err("a flat family takes no profile");
+        assert_eq!(seen.lock().expect("log").len(), before, "no request sent");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn an_exempt_rule_update_that_drifted_after_approval_is_refused() {
+        let existing = json!({
+            "uuid": "x-1",
+            "name": "CUSTOM-EXEMPT",
+            "ips_signature": [{ "uuid": "sig-a", "name": "CUSTOM-A" }]
+        });
+        let state = Arc::new(std::sync::Mutex::new(existing));
+        let (base_url, server, seen) = ips_server(
+            state.clone(),
+            axum::http::StatusCode::OK,
+            json!({"uuid": "x-1"}),
+        )
+        .await;
+        let (manager, _) = ips_manager(&base_url);
+
+        let prepared = manager
+            .prepare_ips_write(
+                "alice".to_owned(),
+                IpsWriteAction::Update,
+                IpsWriteFamily::ExemptRule,
+                Some("p-1".to_owned()),
+                Some("x-1".to_owned()),
+                exempt_rule_body(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("prepare");
+        state.lock().expect("state")["name"] = json!("changed-elsewhere");
+
+        let error = approve_and_apply_ips(&manager, prepared)
+            .await
+            .expect_err("a drifted exempt rule must not be written");
+        assert!(error.to_string().contains("discarded"), "{error}");
+        assert!(writes(&seen).is_empty(), "the stale PUT must never be sent");
         server.abort();
     }
 

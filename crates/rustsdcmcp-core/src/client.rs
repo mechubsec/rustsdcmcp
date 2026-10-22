@@ -1387,7 +1387,7 @@ impl SdcClient {
         family
             .collection_segments(profile_uuid)
             .ok_or(SdcError::InvalidInput(
-                "an IPS rule needs its parent profile_uuid; other IPS families take none",
+                "an IPS rule or exempt rule needs its parent profile_uuid; other IPS families take none",
             ))
     }
 
