@@ -560,8 +560,9 @@ fn plan_artifact(
         "before": before,
         "after": request,
     });
-    // Bound into the digest for rules only, so the plan (and digest) of a
-    // signature or profile write is byte-identical to before rules existed.
+    // Bound into the digest for rules and exempt rules only, so the plan (and
+    // digest) of a signature or profile write is byte-identical to before
+    // rules existed.
     if let (Some(profile), Value::Object(map)) = (profile_uuid, &mut plan) {
         map.insert("profile_uuid".to_owned(), Value::String(profile.to_owned()));
     }
@@ -1276,7 +1277,7 @@ mod tests {
 
     /// Adding a family must not move the digest of an existing envelope.
     #[test]
-    fn signature_and_rule_digests_are_pinned() {
+    fn signature_profile_and_rule_digests_are_pinned() {
         let signature = SdcPreparedIpsWrite::new(
             IpsWriteAction::Create,
             IpsWriteFamily::Signature,
@@ -1293,6 +1294,18 @@ mod tests {
             Value::Null,
         )
         .expect("rule");
+        let profile = SdcPreparedIpsWrite::new(
+            IpsWriteAction::Create,
+            IpsWriteFamily::Profile,
+            None,
+            json!({ "name": "P1" }),
+            Value::Null,
+        )
+        .expect("profile");
+        assert_eq!(
+            profile.plan_digest(),
+            "sha256:7b4e6032995f3617d576690a754a4f2b0318ba9ac4d7df5ee0fd58c24e69bc6c"
+        );
         assert_eq!(
             signature.plan_digest(),
             "sha256:126c123405f600cdab025deae326b157ff7ebe5b82e8a94f2185188d1b04d932"

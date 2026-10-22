@@ -1391,7 +1391,8 @@ impl SdcClient {
             ))
     }
 
-    /// Read one IPS signature, profile, or (with `profile_uuid`) rule by UUID,
+    /// Read one IPS signature, profile, or (with `profile_uuid`) rule or exempt
+    /// rule by UUID,
     /// for before-state and drift detection.
     ///
     /// # Errors
@@ -1412,7 +1413,7 @@ impl SdcClient {
     }
 
     /// Create one custom IPS signature, IPS profile, or (with
-    /// `profile_uuid`) IPS rule.
+    /// `profile_uuid`) IPS rule or exempt rule.
     ///
     /// Takes [`crate::IpsWriteFamily`], not [`ResourceKind`], for the same
     /// reason [`Self::create_resource`] takes [`WritableResource`].
@@ -1435,7 +1436,7 @@ impl SdcClient {
     }
 
     /// Replace one custom IPS signature, IPS profile, or (with
-    /// `profile_uuid`) IPS rule by UUID.
+    /// `profile_uuid`) IPS rule or exempt rule by UUID.
     ///
     /// # Errors
     ///
@@ -1458,7 +1459,7 @@ impl SdcClient {
     }
 
     /// Delete one custom IPS signature, IPS profile, or (with
-    /// `profile_uuid`) IPS rule by UUID.
+    /// `profile_uuid`) IPS rule or exempt rule by UUID.
     ///
     /// # Errors
     ///

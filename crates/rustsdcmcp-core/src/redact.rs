@@ -567,7 +567,7 @@ const IPS_MEMBER_PATTERN_KEYS: &[&str] = &["pattern", "regex"];
 /// names are kept for the reason [`redact_secrets_keeping_ips_signature_names`]
 /// gives: the name of the signature being written (`request`, `before` and
 /// `after` under `family: "signature"`) and every `ips_signature[].name`
-/// reference a rule write carries.
+/// reference a rule or exempt-rule write carries.
 #[must_use]
 pub fn redact_secrets_keeping_ips_patterns(mut value: Value) -> Value {
     let mut kept = Vec::new();

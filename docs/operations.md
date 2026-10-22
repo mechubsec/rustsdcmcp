@@ -464,7 +464,7 @@ when minting a token that should author IPS content.
   `SNMP:COMMUNITY:…` read as `key: value` to the generic redaction, so a
   signature's own `name` (in `ips_signatures` reads and in the signature being
   written) and every `ips_signature[].name` reference (in IPS rule and
-  exempt-rule reads and rule writes) are returned exactly. Descriptions and
+  exempt-rule reads and rule and exempt-rule writes) are returned exactly. Descriptions and
   rule and profile names are still redacted (#277).
 - **Whole-object replace.** An update is a `PUT`; send every field to keep.
   The plan records the observed before-state, and apply refuses if it changed.
