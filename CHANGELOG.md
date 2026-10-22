@@ -9,6 +9,17 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
+## Unreleased
+
+### Added
+
+- Change-controlled IPS exempt-rule writes: `prepare_sdc_ips_write` /
+  `apply_sdc_ips_write` accept `family: exempt_rule` (with `profile_uuid`) to
+  create, update and delete exempt rules at
+  `/api/v1/ips_profiles/{profile_uuid}/exempt_rules`, through the same plan,
+  approval and drift-checked apply flow as IPS rules. The body references
+  signatures in `ips_signature` and must not carry `then`. (#279)
+
 ## `v0.4.1` — 2026-10-22
 
 ### Security
