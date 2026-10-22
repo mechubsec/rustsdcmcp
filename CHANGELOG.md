@@ -9,7 +9,17 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
-## `v0.4.0` — 2026-10-21
+## `v0.4.1` — 2026-10-22
+
+### Security
+
+- Bumps the `gcr.io/distroless/cc-debian13` runtime base for DSA-6572-1
+  (`ca-certificates`). (#282)
+
+## `v0.4.0` — 2026-10-21 (tagged, not released)
+
+The tag exists, but its release image failed the Trivy scan on DSA-6572-1, so
+no GitHub release or MCP Registry entry was published. Use `v0.4.1`.
 
 ### Security
 
