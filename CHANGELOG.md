@@ -9,13 +9,13 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
-## Unreleased
+## `v0.5.0` — 2026-10-26
 
 ### Security
 
 - Bumps `ctutils` to 0.4.6 for RUSTSEC-2026-0385 (non-constant-time mask
   generation and `u128` comparisons). It reaches the build through
-  `digest` → `ed25519-dalek` → `mecmcp-audit`.
+  `digest` → `ed25519-dalek` → `mecmcp-audit`. (#290)
 
 ### Added
 
@@ -31,6 +31,18 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 - `examples/mcp.json.example` and a README section for running the server as
   a local stdio child process. Stdio callers are unauthenticated and get only
   the read tools. (#285)
+
+### Dependencies
+
+- `rmcp` 3.5.1 -> 3.7.0, `tokio` 1.53.3 -> 1.54.1, `uuid` 1.28.0 -> 1.29.0 (#287)
+- `distroless/cc-debian13` runtime base updated (#286)
+- Release workflows: mecmcp reusable workflows v0.28.1 -> v0.28.2,
+  `docker/login-action` 4.6.0 -> 4.7.0 (#288)
+- CI: the mecmcp package-conformance action is pinned at mecmcp v0.30.1 (#289)
+
+The `mecmcp` crates stay on 0.27.0. Moving to 0.29+ is a breaking change of its
+own (reserved `oauth:*` token names, change-set state that older binaries
+cannot read) and is not part of this release.
 
 ## `v0.4.1` — 2026-10-22
 

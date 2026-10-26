@@ -16,9 +16,9 @@ jobs:
       # caller, never widened, so this job must grant them itself -- see
       # mecmcp's docs/RELEASE-WORKFLOWS.md.
       id-token: write
-    # mecmcp v0.28.1. reusable-release-image.yml is the same file as
-    # 42989f6 (#501); this pin is the released tag, and the caller opts
-    # into the Docker Hub inputs that file already declares.
+    # mecmcp v0.28.2 (v0.28.1 plus an upload-artifact bump). The pin is the
+    # released tag, and the caller opts into the Docker Hub inputs that file
+    # already declares.
     uses: mechubsec/mecmcp/.github/workflows/reusable-release-image.yml@982b4d3e8cc660c97fe99826febac1476542cce5 # v0.28.2
     with:
       # GHCR requires a lowercase image path; github.repository is already lowercase.
