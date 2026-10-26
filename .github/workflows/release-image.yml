@@ -19,7 +19,7 @@ jobs:
     # mecmcp v0.28.1. reusable-release-image.yml is the same file as
     # 42989f6 (#501); this pin is the released tag, and the caller opts
     # into the Docker Hub inputs that file already declares.
-    uses: mechubsec/mecmcp/.github/workflows/reusable-release-image.yml@db9e2ea9d1a1ed7e7a962a236e579ad62bb24435 # v0.28.1
+    uses: mechubsec/mecmcp/.github/workflows/reusable-release-image.yml@982b4d3e8cc660c97fe99826febac1476542cce5 # v0.28.2
     with:
       # GHCR requires a lowercase image path; github.repository is already lowercase.
       image: ghcr.io/${{ github.repository }}
@@ -42,7 +42,7 @@ jobs:
       packages: read
     steps:
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -75,7 +75,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: mechubsec/mecmcp/.github/workflows/reusable-registry-publish.yml@db9e2ea9d1a1ed7e7a962a236e579ad62bb24435 # v0.28.1
+    uses: mechubsec/mecmcp/.github/workflows/reusable-registry-publish.yml@982b4d3e8cc660c97fe99826febac1476542cce5 # v0.28.2
     with:
       version: ${{ needs.tag-version.outputs.version }}
       oci-image: ghcr.io/${{ github.repository }}:${{ needs.tag-version.outputs.version }}
