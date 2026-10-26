@@ -248,7 +248,7 @@ jobs:
         # Pinned past mecmcp v0.26.1 (unreleased on main) for mecmcp#492,
         # which teaches the manifest reader the audit_hmac_flag key this
         # repo's conformance.toml now sets. No tagged release contains it yet.
-        uses: mechubsec/mecmcp/packaging/conformance@4815d7b4121be78745ceeae12c25ed86d6da9b2f
+        uses: mechubsec/mecmcp/packaging/conformance@8557155ed1ecd24e7ae25948d70485f0fc8c8451
         with:
           staging: staging
           manifest: staging/conformance.toml
