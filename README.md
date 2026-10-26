@@ -121,6 +121,27 @@ test -n "$package_root"
 tar -xOf "$archive" "$package_root/BUILD-INFO" | grep -Fx "git_commit=$approved_commit"
 ```
 
+## Local stdio client
+
+`--transport stdio` (the default) runs the server as a child process of the
+MCP client, with no listening socket and no bearer token.
+[`examples/mcp.json.example`](examples/mcp.json.example) is a `.mcp.json`
+entry for that. Copy `examples/sdc.example.json` to the `--device-mapping`
+path, fill in the tenant, and `chmod 0600` it: the server refuses a config file
+more permissive than `0640`. `--state-file` overrides the config's
+`/var/lib/rustsdcmcp/changeset-state.json`, which a desktop user cannot
+normally write.
+
+The credential reaches the server through the variable that `credential_env`
+names (`SDC_API_TOKEN` in the example). `${SDC_API_TOKEN}` is expanded from the
+client's environment, so the token stays out of the JSON file. A client that
+does not expand `${...}` needs the variable exported in the environment it is
+launched from.
+
+A stdio caller is unauthenticated, so every write tool (prepare, approve,
+apply) refuses it: stdio is a read-only surface. Change-controlled writes need
+the streamable-HTTP transport with a scoped bearer token.
+
 ## Docker quick start
 
 For running the published container image, see [HOW-TO-SETUP-DOCKER.md](docs/HOW-TO-SETUP-DOCKER.md).
