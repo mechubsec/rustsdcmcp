@@ -249,6 +249,6 @@ jobs:
     # (docs/RELEASE-WORKFLOWS.md allows pinning by tag, but this job holds
     # contents: write and id-token: write, so it gets the same commit-SHA
     # pin this repo's other third-party actions use).
-    uses: mechubsec/mecmcp/.github/workflows/reusable-sign-release-tarball.yml@db9e2ea9d1a1ed7e7a962a236e579ad62bb24435 # v0.28.1
+    uses: mechubsec/mecmcp/.github/workflows/reusable-sign-release-tarball.yml@982b4d3e8cc660c97fe99826febac1476542cce5 # v0.28.2
     with:
       tag: ${{ needs.resolve-tag.outputs.tag }}
