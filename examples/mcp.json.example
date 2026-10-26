@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "sdc": {
+      "command": "/usr/local/bin/rustsdcmcp",
+      "args": [
+        "--transport", "stdio",
+        "--device-mapping", "/home/you/.config/rustsdcmcp/sdc.json",
+        "--state-file", "/home/you/.local/state/rustsdcmcp/changeset-state.json"
+      ],
+      "env": {
+        "SDC_API_TOKEN": "${SDC_API_TOKEN}"
+      }
+    }
+  }
+}

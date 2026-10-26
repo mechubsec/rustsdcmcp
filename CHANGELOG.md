@@ -26,6 +26,12 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
   approval and drift-checked apply flow as IPS rules. The body references
   signatures in `ips_signature` and must not carry `then`. (#279)
 
+### Documentation
+
+- `examples/mcp.json.example` and a README section for running the server as
+  a local stdio child process. Stdio callers are unauthenticated and get only
+  the read tools. (#285)
+
 ## `v0.4.1` — 2026-10-22
 
 ### Security
