@@ -11,6 +11,12 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 
 ## Unreleased
 
+### Security
+
+- Bumps `ctutils` to 0.4.6 for RUSTSEC-2026-0385 (non-constant-time mask
+  generation and `u128` comparisons). It reaches the build through
+  `digest` → `ed25519-dalek` → `mecmcp-audit`.
+
 ### Added
 
 - Change-controlled IPS exempt-rule writes: `prepare_sdc_ips_write` /
