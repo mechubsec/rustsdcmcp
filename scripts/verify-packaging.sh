@@ -175,13 +175,24 @@ if grep -rn -E 'Command::new|std::process|tokio::process' crates --include='*.rs
     fail 'production Rust must not spawn processes'
 fi
 
+# systemd expands a braceless $VAR only as a whole word. `$STATE_DIRECTORY/x`
+# is read as an invalid name and the argument is dropped (#293).
+braceless_var_in_word() {
+    grep -nE '^[^#]*([^[:space:]]\$[A-Za-z_]|\$[A-Za-z_][A-Za-z0-9_]*[^A-Za-z0-9_[:space:]])' "$@"
+}
+if braceless_var_in_word packaging/systemd/*; then
+    fail 'systemd units must brace a variable that is not a whole word'
+fi
+# shellcheck disable=SC2016  # the literal $VAR is the input under test
+printf '%s\n' '    --audit-log-file $STATE_DIRECTORY/audit.jsonl' | braceless_var_in_word - >/dev/null \
+    || fail 'braceless variable check missed the #293 unit line'
+
 service=packaging/systemd/rustsdcmcp.service
 installer=packaging/lxc/install.sh
 ci=.github/workflows/ci.yml
 tmpfiles=packaging/systemd/rustsdcmcp.tmpfiles
 sysusers=packaging/systemd/rustsdcmcp.sysusers
-# shellcheck disable=SC2016  # $STATE_DIRECTORY is a systemd variable, not a shell expansion
-expected_exec='/usr/local/bin/rustsdcmcp --device-mapping /etc/rustsdcmcp/sdc.json --transport streamable-http --host 127.0.0.1 --port 30032 --tokens-file /var/lib/rustsdcmcp/tokens.json --audit-format json --audit-journald --audit-log-file $STATE_DIRECTORY/audit.jsonl --audit-redact devices=hmac --audit-hmac-key-file /etc/rustsdcmcp/audit-hmac.key'
+expected_exec='/usr/local/bin/rustsdcmcp --device-mapping /etc/rustsdcmcp/sdc.json --transport streamable-http --host 127.0.0.1 --port 30032 --tokens-file /var/lib/rustsdcmcp/tokens.json --audit-format json --audit-journald --audit-log-file /var/lib/rustsdcmcp/audit.jsonl --audit-redact devices=hmac --audit-hmac-key-file /etc/rustsdcmcp/audit-hmac.key'
 
 assert_upload_step_policy() {
     local mutated condition

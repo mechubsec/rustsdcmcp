@@ -350,7 +350,7 @@ exception: it may retain the persistent local journal without remote forwarding
 while it remains lab-only; review that exception before any promotion.
 
 When `--audit-log-file` is also set (the packaged unit passes
-`$STATE_DIRECTORY/audit.jsonl`), JSON events are appended to that file too.
+`/var/lib/rustsdcmcp/audit.jsonl`), JSON events are appended to that file too.
 The server keeps the file handle `mecmcp_audit::init_tracing` returns and
 reopens it by path on `SIGHUP`, alongside the token store reload described in
 [Token reload](#token-reload), so rotation is lossless as long as the rotator

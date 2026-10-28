@@ -9,6 +9,19 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
+## Unreleased
+
+### Fixed
+
+- The shipped `rustsdcmcp.service` passed `--audit-log-file
+  $STATE_DIRECTORY/audit.jsonl`. systemd expands a braceless `$VAR` only as a
+  whole word, so it dropped the argument and the service crash-looped on
+  `a value is required for '--audit-log-file'`. Every release from v0.0.1 was
+  affected; deployments whose drop-in replaces `ExecStart=` were not. The unit
+  and `ssdf-evidence.conf.example` now name `/var/lib/rustsdcmcp/` literally,
+  and `scripts/verify-packaging.sh` rejects a braceless `$VAR` inside a word.
+  (#293)
+
 ## `v0.5.0` — 2026-10-26
 
 ### Security
