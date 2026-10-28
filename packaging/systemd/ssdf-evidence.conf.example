@@ -27,11 +27,11 @@ ExecStart=/usr/local/bin/rustsdcmcp \
     --tokens-file /var/lib/rustsdcmcp/tokens.json \
     --audit-format json \
     --audit-journald \
-    --audit-log-file $STATE_DIRECTORY/audit.jsonl \
+    --audit-log-file /var/lib/rustsdcmcp/audit.jsonl \
     --audit-redact devices=hmac \
     --audit-hmac-key-file /etc/rustsdcmcp/audit-hmac.key \
     --ssdf-audit-server-id ${SSDF_SERVER_ID} \
     --ssdf-audit-endpoint ${SSDF_ENDPOINT} \
     --ssdf-audit-ca-file ${SSDF_CA_FILE} \
-    --ssdf-audit-ledger-file $STATE_DIRECTORY/evidence-ledger.ndjson \
-    --ssdf-audit-outbox-file $STATE_DIRECTORY/evidence-outbox.ndjson
+    --ssdf-audit-ledger-file /var/lib/rustsdcmcp/evidence-ledger.ndjson \
+    --ssdf-audit-outbox-file /var/lib/rustsdcmcp/evidence-outbox.ndjson

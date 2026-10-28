@@ -17,7 +17,7 @@ ExecStart=/usr/local/bin/rustsdcmcp \
     --tokens-file /var/lib/rustsdcmcp/tokens.json \
     --audit-format json \
     --audit-journald \
-    --audit-log-file $STATE_DIRECTORY/audit.jsonl \
+    --audit-log-file /var/lib/rustsdcmcp/audit.jsonl \
     --audit-redact devices=hmac \
     --audit-hmac-key-file /etc/rustsdcmcp/audit-hmac.key
 ExecReload=/bin/kill -HUP $MAINPID

@@ -166,8 +166,7 @@ require_service_directive() {
 
 validate_service() {
     local expected exec_start
-    # shellcheck disable=SC2016  # $STATE_DIRECTORY is a systemd variable, not a shell expansion
-    expected='/usr/local/bin/rustsdcmcp --device-mapping /etc/rustsdcmcp/sdc.json --transport streamable-http --host 127.0.0.1 --port 30032 --tokens-file /var/lib/rustsdcmcp/tokens.json --audit-format json --audit-journald --audit-log-file $STATE_DIRECTORY/audit.jsonl --audit-redact devices=hmac --audit-hmac-key-file /etc/rustsdcmcp/audit-hmac.key'
+    expected='/usr/local/bin/rustsdcmcp --device-mapping /etc/rustsdcmcp/sdc.json --transport streamable-http --host 127.0.0.1 --port 30032 --tokens-file /var/lib/rustsdcmcp/tokens.json --audit-format json --audit-journald --audit-log-file /var/lib/rustsdcmcp/audit.jsonl --audit-redact devices=hmac --audit-hmac-key-file /etc/rustsdcmcp/audit-hmac.key'
     exec_start=$(extract_exec_start | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//') || die 'unit has invalid ExecStart'
     [[ "$exec_start" == "$expected" ]] || die 'unit ExecStart does not match the package policy'
     require_service_directive EnvironmentFile /etc/rustsdcmcp/credentials.env
