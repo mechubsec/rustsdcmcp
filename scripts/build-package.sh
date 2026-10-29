@@ -373,14 +373,14 @@ jq -e '
             | [.name, .version]
         ] | sort)
         == [
-            ["mecmcp-audit", "0.27.0"],
-            ["mecmcp-auth", "0.27.0"],
-            ["mecmcp-changeset", "0.27.0"],
-            ["mecmcp-redact", "0.27.0"],
-            ["mecmcp-runtime", "0.27.0"],
-            ["mecmcp-secret", "0.27.0"],
-            ["mecmcp-server", "0.27.0"],
-            ["mecmcp-transport", "0.27.0"]
+            ["mecmcp-audit", "0.31.0"],
+            ["mecmcp-auth", "0.31.0"],
+            ["mecmcp-changeset", "0.31.0"],
+            ["mecmcp-redact", "0.31.0"],
+            ["mecmcp-runtime", "0.31.0"],
+            ["mecmcp-secret", "0.31.0"],
+            ["mecmcp-server", "0.31.0"],
+            ["mecmcp-transport", "0.31.0"]
         ]
     )
     and (tostring | contains("v0.8.0") | not)

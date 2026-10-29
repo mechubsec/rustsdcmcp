@@ -4379,6 +4379,10 @@ mod tests {
             actor_type: ActorType::Human,
             oidc_subject: None,
             verified_approver: None,
+            verified_proposer: None,
+            oauth: None,
+            token_created_at: None,
+            token_expires_at: None,
             request_id: uuid::Uuid::new_v4(),
         }
     }
