@@ -198,8 +198,23 @@ pub struct SdcHandler {
     tenant: Arc<str>,
     client: SdcClient,
     changes: Arc<ChangeManager>,
+    /// `Some(COMPACT_TOOLS)` under `--tool-mode compact`; `None` lists all.
+    compact_tools: Option<&'static [&'static str]>,
     tool_router: ToolRouter<Self>,
 }
+
+/// What `--tool-mode compact` lists: the generic dispatchers, the tenant-scope
+/// entry point the instructions name, and the change-set lifecycle. Listing
+/// only; every tool stays callable within the caller's token scope.
+pub const COMPACT_TOOLS: &[&str] = &[
+    "list_sdc_resources",
+    "get_sdc_resource",
+    "get_sdc_tenant_scope",
+    "get_sdc_change_set",
+    "get_sdc_change_set_details",
+    "approve_sdc_change_set",
+    "apply_sdc_change_set",
+];
 
 impl SdcHandler {
     /// Construct a handler for one configured tenant.
@@ -213,8 +228,17 @@ impl SdcHandler {
             tenant: tenant.into(),
             client,
             changes,
+            compact_tools: None,
             tool_router: Self::sdc_tool_router(),
         }
+    }
+
+    /// List only [`COMPACT_TOOLS`] under `ToolMode::Compact`. Listing only.
+    #[must_use]
+    pub fn with_tool_mode(mut self, mode: mecmcp_runtime::cli::ToolMode) -> Self {
+        self.compact_tools =
+            (mode == mecmcp_runtime::cli::ToolMode::Compact).then_some(COMPACT_TOOLS);
+        self
     }
 
     fn authorize(
@@ -4160,7 +4184,10 @@ impl ServerHandler for SdcHandler {
             .is_some_and(|version| version >= rmcp::model::ProtocolVersion::V_2026_07_28);
         Ok(listed_tools(
             filter_tools_for_scope(
-                self.tool_router.list_all(),
+                mecmcp_server::filter_tools_for_mode(
+                    self.tool_router.list_all(),
+                    self.compact_tools,
+                ),
                 caller_from_extensions::<NoGrant>(&context.extensions),
                 &wildcard_exclusions(),
             ),
@@ -4190,6 +4217,29 @@ mod tests {
             .map(|tool| (*tool).to_owned())
             .collect::<BTreeSet<_>>();
         assert_eq!(registered, known);
+    }
+
+    /// Compact mode lists exactly the registered `COMPACT_TOOLS`; full lists
+    /// the whole router.
+    #[test]
+    fn tool_mode_compact_lists_only_registered_compact_tools() {
+        let registered = SdcHandler::sdc_tool_router().list_all();
+        let listed = |compact: Option<&'static [&'static str]>| {
+            let mut names = mecmcp_server::filter_tools_for_mode(registered.clone(), compact)
+                .iter()
+                .map(|tool| tool.name.to_string())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        assert_eq!(listed(None).len(), registered.len());
+
+        let mut expected = COMPACT_TOOLS
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(listed(Some(COMPACT_TOOLS)), expected);
     }
 
     #[test]
