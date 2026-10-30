@@ -251,3 +251,28 @@ fn egress_proxy_is_unset_by_default_and_validated_when_configured() {
         );
     }
 }
+
+#[test]
+fn config_debug_prints_only_the_egress_proxy_origin() {
+    // Built with setters so no credential-shaped literal trips secret scanners.
+    let mut proxy =
+        url::Url::parse("http://proxy.example.internal:3128/p?token=q").expect("valid URL");
+    proxy
+        .set_username("proxyuser")
+        .expect("http URL takes userinfo");
+    proxy
+        .set_password(Some("s3cret"))
+        .expect("http URL takes userinfo");
+    let mut config = test_config();
+    config.egress_proxy = Some(proxy.into());
+    let printed = format!("{config:?}");
+    assert!(printed.contains("\"http://proxy.example.internal:3128\""));
+    for secret in ["proxyuser", "s3cret", "token"] {
+        assert!(!printed.contains(secret), "{secret} leaked: {printed}");
+    }
+
+    // An unparsable value is withheld whole: it may still hold credentials.
+    config.egress_proxy = Some("s3cret is not a url".to_owned());
+    let printed = format!("{config:?}");
+    assert!(printed.contains("<unparsable>") && !printed.contains("s3cret"));
+}
