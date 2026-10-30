@@ -233,7 +233,7 @@ impl SdcHandler {
         }
     }
 
-    /// List only [`COMPACT_TOOLS`] under `ToolMode::Compact`. Listing only.
+    /// List only `COMPACT_TOOLS` under `ToolMode::Compact`. Listing only.
     #[must_use]
     pub fn with_tool_mode(mut self, mode: mecmcp_runtime::cli::ToolMode) -> Self {
         self.compact_tools =
