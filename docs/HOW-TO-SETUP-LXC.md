@@ -51,20 +51,20 @@ cd /path/to/rustsdcmcp
 mkdir -p target/release
 
 # Pull and extract the binary from the release image
-docker pull ghcr.io/mechubsec/rustsdcmcp:0.5.1
-docker create --name sx ghcr.io/mechubsec/rustsdcmcp:0.5.1
+docker pull ghcr.io/mechubsec/rustsdcmcp:0.6.0
+docker create --name sx ghcr.io/mechubsec/rustsdcmcp:0.6.0
 docker cp sx:/usr/local/bin/rustsdcmcp target/release/rustsdcmcp
 docker rm sx
 
 # Obtain the binary's source commit from the image OCI label
-source_commit=$(docker inspect ghcr.io/mechubsec/rustsdcmcp:0.5.1 \
+source_commit=$(docker inspect ghcr.io/mechubsec/rustsdcmcp:0.6.0 \
     --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')
 # Or from the release tag if the image label is unavailable (peel annotated tags):
-# source_commit=$(git rev-parse v0.5.1^{commit})
+# source_commit=$(git rev-parse v0.6.0^{commit})
 
 SDCMCP_PACKAGE_SKIP_BUILD=1 SDCMCP_BINARY_SOURCE_COMMIT="$source_commit" \
     scripts/build-package.sh
-# >> Wrote dist/<commit>/rustsdcmcp_0.5.1.<date>.<commit>_amd64.tar.gz
+# >> Wrote dist/<commit>/rustsdcmcp_0.6.0.<date>.<commit>_amd64.tar.gz
 ```
 
 **The source commit is required**: the package records it as provenance in
@@ -114,7 +114,7 @@ For lab mode, use VMID 615 with IP `.235`, hostname `test-labmode-sdc`, and tag
 ## 4. Install
 
 ```bash
-pct push 614 dist/<commit>/rustsdcmcp_0.5.1.*_amd64.tar.gz /tmp/pkg.tar.gz
+pct push 614 dist/<commit>/rustsdcmcp_0.6.0.*_amd64.tar.gz /tmp/pkg.tar.gz
 pct exec 614 -- bash -lc 'cd /tmp && tar xzf pkg.tar.gz && cd rustsdcmcp_*/ && bash packaging/lxc/install.sh'
 ```
 
