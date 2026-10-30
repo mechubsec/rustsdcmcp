@@ -11,6 +11,10 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 
 ## Unreleased
 
+### Added
+
+- `--tool-mode full|compact` (env `MCP_TOOL_MODE`, default `full`): `compact` lists only `list_sdc_resources`, `get_sdc_resource`, `get_sdc_tenant_scope` and the four change-set tools. Listing only; every tool stays callable within the token's scope. (#285)
+
 ### Changed
 
 - Bumped the `mecmcp` dependency pin from v0.27.0 to v0.31.0, together with the

@@ -142,6 +142,16 @@ A stdio caller is unauthenticated, so every write tool (prepare, approve,
 apply) refuses it: stdio is a read-only surface. Change-controlled writes need
 the streamable-HTTP transport with a scoped bearer token.
 
+### Tool listing mode
+
+`--tool-mode full|compact` (env `MCP_TOOL_MODE`, default `full`) controls what
+`tools/list` advertises. `compact` lists only `list_sdc_resources`,
+`get_sdc_resource`, `get_sdc_tenant_scope` and the change-set tools
+(`get_sdc_change_set`, `get_sdc_change_set_details`, `approve_sdc_change_set`,
+`apply_sdc_change_set`) to keep the client's tool context small. It is listing
+only: it composes with token scopes and never widens them, every tool stays
+callable, and the token's tool and tenant scopes still authorize each call.
+
 ## Docker quick start
 
 For running the published container image, see [HOW-TO-SETUP-DOCKER.md](docs/HOW-TO-SETUP-DOCKER.md).

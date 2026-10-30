@@ -104,6 +104,12 @@ struct ServerCli {
     /// `--max-requests-per-second-per-token`; `0`/`0` disables per-token rate limiting.
     #[arg(long, default_value_t = 40)]
     max_request_burst_per_token: u64,
+
+    /// `--tool-mode full|compact` (env `MCP_TOOL_MODE`): compact lists only the
+    /// generic dispatchers and change-set tools. Listing only; token scopes
+    /// still authorize every call.
+    #[command(flatten)]
+    tool_mode: mecmcp_runtime::cli::ToolModeArgs,
 }
 
 /// Parser default for `--approval-timeout-secs`.
@@ -762,6 +768,7 @@ async fn main() -> Result<()> {
         max_request_burst_per_ip,
         max_requests_per_second_per_token,
         max_request_burst_per_token,
+        tool_mode,
     } = parsed.cli;
     mecmcp_runtime::cli_validate::validate_or_exit(&args);
 
@@ -949,7 +956,8 @@ async fn main() -> Result<()> {
             .map(mecmcp_audit::EvidenceService::recorder),
         approval_digest_key,
     )?);
-    let handler = SdcHandler::new(Arc::<str>::from(config.tenant.as_str()), client, changes);
+    let handler = SdcHandler::new(Arc::<str>::from(config.tenant.as_str()), client, changes)
+        .with_tool_mode(tool_mode.tool_mode);
 
     if matches!(auth_mode, Some(AuthMode::NoAuth)) {
         tracing::warn!(
