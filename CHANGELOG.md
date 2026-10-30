@@ -9,6 +9,27 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
+## Unreleased
+
+### Changed
+
+- Bumped the `mecmcp` dependency pin from v0.27.0 to v0.31.0, together with the
+  tag and SBOM guards in CI, packaging, and the installer. This is a pin bump
+  only: no new mecmcp feature (OAuth resource mode, device selectors, verified
+  proposer, `whoami`) is enabled. (#285)
+
+### Upgrade notes
+
+- Token names starting with `oauth:` are now reserved. A static token file
+  containing one fails to load as a whole (every token is refused), so rename
+  any such token before upgrading.
+- Every per-call audit line gains `oauth_issuer=`, `oauth_subject=` and
+  `oauth_client_id=` fields (empty for static-token callers), and an
+  `identity_mechanism` field. Parsers must tolerate them.
+- Rollback: once an OAuth caller has created a change set, a pre-0.29 binary
+  cannot read the change-set state file. This server does not expose the OAuth
+  resource-server flags, so it does not apply here unless that is enabled later.
+
 ## `v0.5.1` — 2026-10-28
 
 ### Fixed
