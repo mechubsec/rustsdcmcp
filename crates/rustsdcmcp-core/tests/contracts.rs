@@ -267,8 +267,12 @@ fn config_debug_prints_only_the_egress_proxy_origin() {
     config.egress_proxy = Some(proxy.into());
     let printed = format!("{config:?}");
     assert!(printed.contains("\"http://proxy.example.internal:3128\""));
-    for secret in ["proxyuser", "s3cret", "token"] {
-        assert!(!printed.contains(secret), "{secret} leaked: {printed}");
+    // The message names the fragment only: printing `printed` trips CodeQL's cleartext-logging rule.
+    for fragment in ["proxyuser", "s3cret", "token"] {
+        assert!(
+            !printed.contains(fragment),
+            "{fragment} leaked into Debug output"
+        );
     }
 
     // An unparsable value is withheld whole: it may still hold credentials.
