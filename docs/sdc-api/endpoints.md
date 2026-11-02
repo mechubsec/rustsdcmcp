@@ -3,7 +3,7 @@
 Generated from the vendored OpenAPI export — see [`README.md`](README.md)
 for provenance. Do not hand-edit; regenerate with `scripts/gen-endpoint-inventory.py`.
 
-`Security Director Cloud APIs` v1.0.0 · 227 paths · 368 operations · 61 groups
+`Security Director Cloud APIs` v1.0.0 · 234 paths · 377 operations · 63 groups
 
 Base URL: `https://api.sdcloud.juniperclouds.net/`
 
@@ -22,7 +22,9 @@ Base URL: `https://api.sdcloud.juniperclouds.net/`
 | [Device Resources](#device-resources) | 7 |
 | [MNHA Clusters](#mnha-clusters) | 2 |
 | [Templates](#templates) | 20 |
+| [Device](#device) | 1 |
 | [RMA](#rma) | 6 |
+| [L2 Cluster Deployments](#l2-cluster-deployments) | 8 |
 | [AamwProfile](#aamwprofile) | 5 |
 | [ContentFilteringProfile](#contentfilteringprofile) | 5 |
 | [ContentSecurityProfile](#contentsecurityprofile) | 5 |
@@ -224,6 +226,12 @@ Base URL: `https://api.sdcloud.juniperclouds.net/`
 | `POST` | `/api/v1/templates/{template_id}/preview` | PreviewTemplate |
 | `POST` | `/api/v1/templates/{template_id}/validate` | ValidateTemplate |
 
+## Device
+
+| Method | Path | Operation |
+|---|---|---|
+| `GET` | `/api/v1/device_operations/{device_id}/cluster_interface_status` | GetClusterInterfaceStatusInformation |
+
 ## RMA
 
 | Method | Path | Operation |
@@ -234,6 +242,19 @@ Base URL: `https://api.sdcloud.juniperclouds.net/`
 | `GET` | `/api/v1/devices/{device_id}/rma/reactivation_config` | GetRMAReactivationConfig |
 | `POST` | `/api/v1/devices/{device_id}/rma/reactivation_preferences` | SetupRmaDeviceForReactivation |
 | `GET` | `/api/v1/devices/{device_id}/rma/state` | GetRMADeviceStatus |
+
+## L2 Cluster Deployments
+
+| Method | Path | Operation |
+|---|---|---|
+| `POST` | `/api/v1/l2_cluster_deployments` | CreateL2ClusterDeployment |
+| `POST` | `/api/v1/l2_cluster_deployments/validate` | ValidateL2ClusterDeployment |
+| `GET` | `/api/v1/l2_cluster_deployments/{l2_cluster_deployment_id}` | GetL2ClusterDeployment |
+| `DELETE` | `/api/v1/l2_cluster_deployments/{l2_cluster_deployment_id}` | DeleteL2ClusterDeployment |
+| `PUT` | `/api/v1/l2_cluster_deployments/{l2_cluster_deployment_id}` | UpdateL2ClusterDeployment |
+| `POST` | `/api/v1/l2_cluster_deployments/{l2_cluster_deployment_id}/deploy` | CommitL2ClusterDeployment |
+| `GET` | `/api/v1/l2_cluster_deployments/{l2_cluster_deployment_id}/status` | GetL2ClusterDeploymentStatus |
+| `GET` | `/api/v1/l2_cluster_model_config` | GetL2ClusterModelConfig |
 
 ## AamwProfile
 

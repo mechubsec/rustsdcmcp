@@ -9,6 +9,17 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
+## Unreleased
+
+### Changed
+
+- Refreshed the vendored SDC OpenAPI export and `docs/sdc-api/endpoints.md`
+  (368 -> 377 operations). Documentation only, no client or tool change. The
+  changed operations are a widened `description` limit (255 -> 999) on a shared
+  schema, plus additive `gbp_tags` on firewall rules and `interfaces` on device
+  zones. The 9 added operations (L2 cluster deployments and a cluster
+  interface status read) are not implemented. (#300)
+
 ## `v0.6.0` — 2026-10-29
 
 ### Added

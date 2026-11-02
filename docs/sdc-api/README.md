@@ -20,11 +20,11 @@ https://www.juniper.net/documentation/us/en/software/sd-cloud/api/static/exports
 | | |
 |---|---|
 | Vendored as | `security-director-cloud-apis-openapi3.json` |
-| Retrieved | 2026-07-25 |
+| Retrieved | 2026-11-02 |
 | `info.title` / `info.version` | `Security Director Cloud APIs` v`1.0.0` |
 | `openapi` | `3.0.0` |
-| sha256 | `099d1f0f5f4ce008e0c927dbc2c948b3bfe57337e15b909733dbea21d347ecc5` |
-| Size | 227 paths · 368 operations · 61 tag groups · 804 schemas |
+| sha256 | `0368815ca197439665bdf1ad16a745c87aad92eb8298830ec6bf2d4a5b05a6b3` |
+| Size | 234 paths · 377 operations · 63 tag groups · 919 schemas |
 
 Refresh with [`fetch-spec.sh`](fetch-spec.sh), then regenerate
 [`endpoints.md`](endpoints.md) with `scripts/gen-endpoint-inventory.py`. The
@@ -154,7 +154,7 @@ schema (`runtimeError1`):
 
 ## Surface at a glance
 
-368 operations — 173 `GET`, 96 `POST`, 50 `DELETE`, 49 `PUT`. Largest groups:
+377 operations — 177 `GET`, 99 `POST`, 51 `DELETE`, 50 `PUT`. Largest groups:
 
 | Group | Ops | | Group | Ops |
 |---|---:|---|---|---:|
@@ -172,7 +172,7 @@ are almost all a uniform 5-op CRUD shape. Full listing:
 
 ## What this means for the tool surface
 
-1. **Read-only first.** 173 `GET` operations, and the object-CRUD groups are
+1. **Read-only first.** 177 `GET` operations, and the object-CRUD groups are
    uniform enough that a small number of generic list/get tools can cover most
    of them without 35 bespoke tools.
 2. **Mutations go through `mecmcp-changeset`.** The preview → deploy split is
