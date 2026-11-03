@@ -9,6 +9,12 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
+## Unreleased
+
+### Fixed
+
+- `SdcConfig`'s `Debug` output showed the `egress_proxy` URL in full, including any credentials in it. It now shows only the proxy's origin (scheme, host, port). No shipped code path printed the config, so nothing leaked.
+
 ## `v0.6.0` — 2026-10-29
 
 ### Added
