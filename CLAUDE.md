@@ -144,7 +144,7 @@ Load-bearing facts, all verified in the spec:
 
 - Base URL `https://api.sdcloud.juniperclouds.net/`, single server.
 - Auth is a header — `x-api-key` or `x-oauth2-token` — declared at the document
-  root, and **no operation overrides it** (0 of 368).
+  root, and **no operation overrides it** (0 of 377).
 - Path versioning is **mixed**: `/api/v1/` for policies/devices/templates,
   `/api/v2/` for IAM/site/tunnels. Never assume one version.
 - Bulk mutations are **async**: `POST` → job id, then status and per-device

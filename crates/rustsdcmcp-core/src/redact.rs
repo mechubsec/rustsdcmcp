@@ -71,8 +71,9 @@ pub const REDACTED: &str = "[REDACTED]";
 ///   `maxsessionnumber`, `noofsessions`, `disablesessionresumption`,
 ///   `sessionignoredlog`, `sessionsallowedlog`, `sessionsdroppedlog`,
 ///   `sessionswhitelistedlog`, `sslsessioncache`, `closesessionaction`,
-///   `maxsessions`): firewall-rule logging flags and NAT/SSL/ICAP session
-///   settings, not credentials. Over-redacting them can hide a policy rule's
+///   `maxsessions`, `sessiontype`): firewall-rule logging flags, NAT/SSL/ICAP
+///   session settings and BFD session types, not credentials. Over-redacting
+///   them can hide a policy rule's
 ///   real session-logging state from the model reviewing a write (MEC-973
 ///   F1).
 const KEY_EXEMPTIONS: &[&str] = &[
@@ -90,6 +91,7 @@ const KEY_EXEMPTIONS: &[&str] = &[
     "sslsessioncache",
     "closesessionaction",
     "maxsessions",
+    "sessiontype",
 ];
 
 /// SDC's declared extensions to the shared crate's generic denylist-and-shape
