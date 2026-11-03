@@ -39,7 +39,7 @@ pub(crate) struct PollSettings {
 }
 
 /// Configuration for one SDC tenant.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SdcConfig {
     /// Configuration schema version.
@@ -104,6 +104,61 @@ pub struct SdcConfig {
     /// redirect requests to an unintended host.
     #[serde(default)]
     pub egress_proxy: Option<String>,
+}
+
+/// Hand-written so `egress_proxy` prints only its origin: the URL's userinfo
+/// may carry proxy credentials.
+impl std::fmt::Debug for SdcConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Exhaustive, so a new field cannot be added without deciding how it prints.
+        let Self {
+            version,
+            tenant,
+            expected_tenant_id,
+            credential_env,
+            auth_scheme,
+            endpoint,
+            connect_timeout_ms,
+            request_timeout_ms,
+            max_response_bytes,
+            max_concurrency,
+            max_page_size,
+            list_page_budget_bytes,
+            poll_initial_ms,
+            poll_max_ms,
+            poll_deadline_ms,
+            changeset_state_file,
+            approval_ttl_secs,
+            egress_proxy,
+        } = self;
+        let egress_proxy_origin = egress_proxy.as_deref().map(|raw| {
+            Url::parse(raw).map_or_else(
+                |_| "<unparsable>".to_owned(),
+                |url| url.origin().ascii_serialization(),
+            )
+        });
+        formatter
+            .debug_struct("SdcConfig")
+            .field("version", version)
+            .field("tenant", tenant)
+            .field("expected_tenant_id", expected_tenant_id)
+            .field("credential_env", credential_env)
+            .field("auth_scheme", auth_scheme)
+            .field("endpoint", endpoint)
+            .field("connect_timeout_ms", connect_timeout_ms)
+            .field("request_timeout_ms", request_timeout_ms)
+            .field("max_response_bytes", max_response_bytes)
+            .field("max_concurrency", max_concurrency)
+            .field("max_page_size", max_page_size)
+            .field("list_page_budget_bytes", list_page_budget_bytes)
+            .field("poll_initial_ms", poll_initial_ms)
+            .field("poll_max_ms", poll_max_ms)
+            .field("poll_deadline_ms", poll_deadline_ms)
+            .field("changeset_state_file", changeset_state_file)
+            .field("approval_ttl_secs", approval_ttl_secs)
+            .field("egress_proxy", &egress_proxy_origin)
+            .finish()
+    }
 }
 
 impl SdcConfig {
