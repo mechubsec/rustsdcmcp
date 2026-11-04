@@ -23,6 +23,19 @@
 //! An IPS write changes SDC's model only. Nothing reaches a device until a
 //! policy referencing the profile is deployed through
 //! `prepare_sdc_policy_deploy` → approve → `apply_sdc_change_set`.
+//!
+//! ## Several rule writes in one change set
+//!
+//! Building out a profile is usually several rules and exempt rules at once,
+//! and one approval per rule turns that into a long run of identical
+//! approve/apply round trips. [`validate_ips_change_set`] lets one change set
+//! carry up to [`MAX_IPS_BATCH_WRITES`] rule and exempt-rule writes inside a
+//! single profile, bound by one digest over every write's plan
+//! ([`ips_change_set_digest`]) and approved once. Each write keeps every guard
+//! and its own drift check. SDC has no transaction across requests, so apply
+//! sends them in order and stops at the first failure; a failure after a write
+//! has landed is reported as `Indeterminate` with each write's status, never
+//! as a clean refusal.
 
 use crate::{ListRequest, ResourceKind, SdcClient, SdcError, prepared::canonical_digest};
 use async_trait::async_trait;
@@ -32,9 +45,12 @@ use mecmcp_changeset::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::sync::{
-    Arc, OnceLock,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    collections::BTreeSet,
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio_util::sync::CancellationToken;
 
@@ -149,6 +165,134 @@ impl IpsWriteAction {
     pub const fn targets_existing(self) -> bool {
         matches!(self, Self::Update | Self::Delete)
     }
+}
+
+/// Most writes one IPS change set may carry.
+///
+/// Half the change-set coordinator's 64-action cap, and few enough that an
+/// approver can still read every write in the one plan they approve.
+pub const MAX_IPS_BATCH_WRITES: usize = 32;
+
+/// Plan discriminator of a change set carrying more than one IPS write.
+const BATCH_OPERATION: &str = "ips_write_batch";
+
+/// The IPS families a multi-write change set may carry.
+///
+/// Rules and exempt rules only. They reference objects that already exist, so
+/// every write can be fully planned and checked before approval. A signature
+/// create would hand back a UUID nothing else in the batch could reference
+/// yet, and a signature or profile delete's reference scan would be
+/// invalidated by a rule delete planned beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IpsRuleFamily {
+    /// An IPS rule (`…/ips_rules`).
+    Rule,
+    /// An IPS exempt rule (`…/exempt_rules`).
+    ExemptRule,
+}
+
+impl From<IpsRuleFamily> for IpsWriteFamily {
+    fn from(family: IpsRuleFamily) -> Self {
+        match family {
+            IpsRuleFamily::Rule => Self::Rule,
+            IpsRuleFamily::ExemptRule => Self::ExemptRule,
+        }
+    }
+}
+
+/// One rule or exempt-rule write requested as part of a multi-write change
+/// set. The parent profile is given once for the whole change set.
+#[derive(Debug, Clone, PartialEq, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IpsRuleBatchWrite {
+    /// Which mutation to plan.
+    pub action: IpsWriteAction,
+    /// `rule` for an IPS rule, `exempt_rule` for an IPS exempt rule.
+    pub family: IpsRuleFamily,
+    /// Target rule UUID. Required for update and delete, absent for create.
+    #[serde(default)]
+    pub uuid: Option<String>,
+    /// Full `IPSRuleInput` or `IPSExemptRuleInput` body. Required for create
+    /// and update, absent for delete.
+    #[serde(default)]
+    pub body: Option<Value>,
+}
+
+/// The plan an approver reviews for one IPS change set.
+///
+/// A single write's plan is its own, unchanged, so a one-write change set is
+/// byte-identical to one prepared before multi-write change sets existed.
+/// Several writes are wrapped, in the order apply sends them.
+#[must_use]
+pub fn ips_change_set_plan(writes: &[SdcPreparedIpsWrite]) -> Value {
+    match writes {
+        [single] => single.plan(),
+        _ => json!({
+            "operation": BATCH_OPERATION,
+            "write_count": writes.len(),
+            "writes": writes.iter().map(SdcPreparedIpsWrite::plan).collect::<Vec<_>>(),
+        }),
+    }
+}
+
+/// Canonical digest binding a whole IPS change set: every write, in order.
+///
+/// # Errors
+///
+/// Returns an error when the plan cannot be canonicalized.
+pub fn ips_change_set_digest(writes: &[SdcPreparedIpsWrite]) -> Result<String, SdcError> {
+    canonical_digest(&ips_change_set_plan(writes))
+        .map_err(|error| SdcError::PreparedChange(error.to_string()))
+}
+
+/// Revalidate every write of an IPS change set, and the rules a change set of
+/// more than one write must also follow.
+///
+/// Runs at prepare and again at stage, so a state file edited to add, drop,
+/// reorder or retarget a write is refused (the digest catches the rest).
+///
+/// # Errors
+///
+/// Refuses an empty or oversized change set, any write that fails its own
+/// guards, and, for several writes, a family other than rule or exempt rule,
+/// writes spanning more than one profile, or two writes to the same target.
+pub fn validate_ips_change_set(writes: &[SdcPreparedIpsWrite]) -> Result<(), SdcError> {
+    if writes.is_empty() || writes.len() > MAX_IPS_BATCH_WRITES {
+        return Err(SdcError::PreparedChange(format!(
+            "an IPS change set carries 1-{MAX_IPS_BATCH_WRITES} writes"
+        )));
+    }
+    for write in writes {
+        write.validate()?;
+    }
+    let [first, _, ..] = writes else {
+        return Ok(());
+    };
+    // Rule and exempt-rule UUIDs live in separate collections.
+    let mut targets = BTreeSet::new();
+    for (index, write) in writes.iter().enumerate() {
+        if !write.family().requires_profile() {
+            return Err(SdcError::PreparedChange(format!(
+                "write {index}: an IPS change set of several writes carries only rule and \
+                 exempt-rule writes"
+            )));
+        }
+        if write.profile_uuid() != first.profile_uuid() {
+            return Err(SdcError::PreparedChange(format!(
+                "write {index}: every write of an IPS change set must target the same profile"
+            )));
+        }
+        if let Some(uuid) = write.uuid()
+            && !targets.insert((write.family() == IpsWriteFamily::ExemptRule, uuid))
+        {
+            return Err(SdcError::PreparedChange(format!(
+                "write {index}: {uuid} is already the target of an earlier write in this \
+                 change set"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Exact IPS write bound into a change-set action.
@@ -537,6 +681,18 @@ fn created_uuid_from(response: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|uuid| !uuid.is_empty())
         .map(str::to_owned)
+}
+
+/// `ips_create as <uuid>, ips_update, …` for the writes that landed.
+fn describe_landed(landed: &[(&str, Option<String>)]) -> String {
+    landed
+        .iter()
+        .map(|(action, created)| match created {
+            Some(uuid) => format!("{action} as {uuid}"),
+            None => (*action).to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The spec's `IpsProfileInput.name` format: `^[^#&;\r\n ]{1,127}$`.
@@ -930,16 +1086,22 @@ pub async fn ensure_unreferenced(
     }
 }
 
-/// Outcome of revalidating an IPS write immediately before commit.
+/// Outcome of revalidating an IPS change set immediately before commit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpsValidationReport {
-    /// Whether the envelope is intact and the target has not drifted.
+    /// Whether the envelope is intact and no target has drifted.
     pub valid: bool,
-    /// Which mutation was validated.
-    pub action: IpsWriteAction,
-    /// Which IPS family was validated.
-    pub family: IpsWriteFamily,
-    /// Whether the live target still matched its prepared `before` state.
+    /// Which mutation was validated. Absent for a change set of several
+    /// writes, whose actions are listed in its plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<IpsWriteAction>,
+    /// Which IPS family was validated. Absent for a change set of several
+    /// writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<IpsWriteFamily>,
+    /// How many writes the change set carries.
+    pub write_count: usize,
+    /// Whether every live target still matched its prepared `before` state.
     pub target_unchanged: bool,
 }
 
@@ -952,7 +1114,68 @@ pub struct IpsPrepareResult {
     pub prepared_change: SdcPreparedIpsWrite,
 }
 
-/// Result of applying one approved IPS write.
+/// Result of planning several IPS rule and exempt-rule writes as one change
+/// set.
+#[derive(Debug, Clone, Serialize)]
+pub struct IpsBatchPrepareResult {
+    /// Shared two-person change-set record.
+    pub change_set: mecmcp_changeset::ChangeSetOutput,
+    /// Digest binding every write, in order; apply takes it as
+    /// `expected_plan_digest`.
+    pub plan_digest: String,
+    /// The whole plan the approver reviews, in the order apply sends it.
+    pub plan: Value,
+    /// Exact writes bound by the plan digest, in order.
+    pub prepared_changes: Vec<SdcPreparedIpsWrite>,
+}
+
+/// What happened to one write of an applied IPS change set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IpsWriteStatus {
+    /// SDC accepted the write.
+    Applied,
+    /// SDC definitively rejected the write; it did not land.
+    Rejected,
+    /// The write was sent but its outcome was not observed; check SDC.
+    Unknown,
+    /// Apply stopped before sending the write.
+    NotAttempted,
+}
+
+/// Per-write outcome of an applied IPS change set, in send order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IpsWriteOutcome {
+    /// Position in the change set.
+    pub index: usize,
+    /// Which mutation this write performed.
+    pub action: IpsWriteAction,
+    /// Which IPS family this write targeted.
+    pub family: IpsWriteFamily,
+    /// Target UUID, absent for create.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<String>,
+    /// What happened to it.
+    pub status: IpsWriteStatus,
+    /// UUID SDC allocated for an applied create, when its response carried one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_uuid: Option<String>,
+}
+
+impl IpsWriteOutcome {
+    fn pending(index: usize, write: &SdcPreparedIpsWrite) -> Self {
+        Self {
+            index,
+            action: write.action(),
+            family: write.family(),
+            uuid: write.uuid().map(str::to_owned),
+            status: IpsWriteStatus::NotAttempted,
+            created_uuid: None,
+        }
+    }
+}
+
+/// Result of applying one approved IPS change set.
 #[derive(Debug, Clone, Serialize)]
 pub struct IpsApplyResult {
     /// Shared operation identifier.
@@ -963,10 +1186,15 @@ pub struct IpsApplyResult {
     pub validation: IpsValidationReport,
     /// Known, detached, or indeterminate commit disposition.
     pub outcome: CommitOutcome,
-    /// UUID SDC allocated for a successful create, so a follow-up update can
-    /// address it without searching the collection. `None` for update and
-    /// delete, and for a create whose response carried no UUID.
+    /// UUID SDC allocated for a successful create in a one-write change set,
+    /// so a follow-up update can address it without searching the collection.
+    /// `None` for update and delete, for a create whose response carried no
+    /// UUID, and for a change set of several writes (see `writes`).
     pub created_uuid: Option<String>,
+    /// What happened to each write, in send order. After an `Indeterminate`
+    /// outcome this says which writes landed, which did not, and which need
+    /// checking in SDC.
+    pub writes: Vec<IpsWriteOutcome>,
 }
 
 /// SDC implementation of the shared transaction contract for IPS writes.
@@ -976,7 +1204,7 @@ pub struct SdcIpsTransaction {
     expected_plan_digest: String,
     cancellation: CancellationToken,
     refused_before_write: Arc<AtomicBool>,
-    created_uuid: Arc<OnceLock<String>>,
+    outcomes: Arc<Mutex<Vec<IpsWriteOutcome>>>,
 }
 
 impl SdcIpsTransaction {
@@ -992,7 +1220,7 @@ impl SdcIpsTransaction {
             expected_plan_digest: expected_plan_digest.into(),
             cancellation,
             refused_before_write: Arc::new(AtomicBool::new(false)),
-            created_uuid: Arc::new(OnceLock::new()),
+            outcomes: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -1005,13 +1233,77 @@ impl SdcIpsTransaction {
         self.refused_before_write.load(Ordering::SeqCst)
     }
 
-    /// UUID SDC returned for a successful create, if any.
+    /// UUID SDC returned for a successful create in a one-write change set.
     ///
     /// The coordinator's [`CommitOutcome`] has no slot for it, so the
-    /// transaction keeps it for the caller to report.
+    /// transaction keeps it for the caller to report. A change set of several
+    /// writes reports each create's UUID in [`Self::write_outcomes`] instead.
     #[must_use]
     pub fn created_uuid(&self) -> Option<String> {
-        self.created_uuid.get().cloned()
+        match self.write_outcomes().as_slice() {
+            [single] => single.created_uuid.clone(),
+            _ => None,
+        }
+    }
+
+    /// What happened to each write so far, in send order.
+    ///
+    /// Updated as each request is issued, so it stays truthful when commit is
+    /// cancelled mid-way: a write sent but not answered reads `unknown`.
+    #[must_use]
+    pub fn write_outcomes(&self) -> Vec<IpsWriteOutcome> {
+        self.outcomes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set_status(&self, index: usize, status: IpsWriteStatus, created_uuid: Option<String>) {
+        let mut outcomes = self.outcomes.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(outcome) = outcomes.get_mut(index) {
+            outcome.status = status;
+            outcome.created_uuid = created_uuid;
+        }
+    }
+
+    /// Issue one write's request.
+    async fn send(&self, staged: &SdcPreparedIpsWrite) -> Result<Value, SdcError> {
+        let family = staged.family();
+        match (staged.action(), staged.uuid()) {
+            (IpsWriteAction::Create, _) => {
+                self.client
+                    .create_ips_object(
+                        family,
+                        staged.profile_uuid(),
+                        staged.request(),
+                        &self.cancellation,
+                    )
+                    .await
+            }
+            (IpsWriteAction::Update, Some(uuid)) => {
+                self.client
+                    .update_ips_object(
+                        family,
+                        staged.profile_uuid(),
+                        uuid,
+                        staged.request(),
+                        &self.cancellation,
+                    )
+                    .await
+            }
+            (IpsWriteAction::Delete, Some(uuid)) => {
+                self.client
+                    .delete_ips_object(family, staged.profile_uuid(), uuid, &self.cancellation)
+                    .await
+            }
+            // Refused before any write is sent; see `commit`.
+            (IpsWriteAction::Update | IpsWriteAction::Delete, None) => {
+                Err(SdcError::PreparedChange(format!(
+                    "prepared {} is missing its target UUID",
+                    staged.action().as_str()
+                )))
+            }
+        }
     }
 
     /// Re-read the target and report whether it still matches its plan.
@@ -1040,7 +1332,7 @@ impl SdcIpsTransaction {
 #[async_trait]
 impl DeviceTransaction for SdcIpsTransaction {
     type Action = SdcPreparedIpsWrite;
-    type Staged = SdcPreparedIpsWrite;
+    type Staged = Vec<SdcPreparedIpsWrite>;
     type Diff = Value;
     type Validation = IpsValidationReport;
     type Error = SdcError;
@@ -1051,35 +1343,36 @@ impl DeviceTransaction for SdcIpsTransaction {
 
     /// Sole validation point for the persisted envelope.
     async fn stage(&self, actions: &[Self::Action]) -> Result<Self::Staged, Self::Error> {
-        let [prepared] = actions else {
-            return Err(SdcError::InvalidInput(
-                "an SDC IPS write requires exactly one prepared change",
-            ));
-        };
-        prepared.validate()?;
-        if prepared.plan_digest() != self.expected_plan_digest {
+        validate_ips_change_set(actions)?;
+        if ips_change_set_digest(actions)? != self.expected_plan_digest {
             return Err(SdcError::PreparedChange(
                 "prepared action does not match the approved plan digest".to_owned(),
             ));
         }
-        Ok(prepared.clone())
+        Ok(actions.to_vec())
     }
 
     async fn diff(&self, staged: &Self::Staged) -> Result<Self::Diff, Self::Error> {
-        Ok(staged.plan())
+        Ok(ips_change_set_plan(staged))
     }
 
-    /// Refuse the write if the target moved since it was prepared.
+    /// Refuse the change set if any target moved since it was prepared.
     async fn validate(&self, staged: &Self::Staged) -> Result<Self::Validation, Self::Error> {
-        let target_unchanged = self.target_unchanged(staged).await?;
-        if !target_unchanged {
-            return Err(SdcError::TargetDrifted);
+        for write in staged {
+            if !self.target_unchanged(write).await? {
+                return Err(SdcError::TargetDrifted);
+            }
         }
+        let single = match staged.as_slice() {
+            [single] => Some(single),
+            _ => None,
+        };
         Ok(IpsValidationReport {
             valid: true,
-            action: staged.action(),
-            family: staged.family(),
-            target_unchanged,
+            action: single.map(SdcPreparedIpsWrite::action),
+            family: single.map(SdcPreparedIpsWrite::family),
+            write_count: staged.len(),
+            target_unchanged: true,
         })
     }
 
@@ -1100,83 +1393,106 @@ impl DeviceTransaction for SdcIpsTransaction {
         // Re-check drift immediately before writing: the coordinator releases
         // its guard between validate and commit, and that guard cannot exclude
         // a writer working directly against SDC. SDC has no conditional write,
-        // so this narrows the window rather than closing it.
-        if !self.target_unchanged(staged).await? {
-            return Err(SdcError::TargetDrifted);
-        }
-        let family = staged.family();
-        // From here the outcome is no longer knowably clean.
-        self.refused_before_write.store(false, Ordering::SeqCst);
-        let result = match (staged.action(), staged.uuid()) {
-            (IpsWriteAction::Create, _) => {
-                self.client
-                    .create_ips_object(
-                        family,
-                        staged.profile_uuid(),
-                        staged.request(),
-                        &self.cancellation,
-                    )
-                    .await
-            }
-            (IpsWriteAction::Update, Some(uuid)) => {
-                self.client
-                    .update_ips_object(
-                        family,
-                        staged.profile_uuid(),
-                        uuid,
-                        staged.request(),
-                        &self.cancellation,
-                    )
-                    .await
-            }
-            (IpsWriteAction::Delete, Some(uuid)) => {
-                self.client
-                    .delete_ips_object(family, staged.profile_uuid(), uuid, &self.cancellation)
-                    .await
-            }
-            (IpsWriteAction::Update | IpsWriteAction::Delete, None) => {
-                self.refused_before_write.store(true, Ordering::SeqCst);
+        // so this narrows the window rather than closing it. Every target is
+        // checked before the first request, so drift anywhere in a change set
+        // refuses it while nothing has been written.
+        for write in staged {
+            if write.action().targets_existing() && write.uuid().is_none() {
                 return Err(SdcError::PreparedChange(format!(
                     "prepared {} is missing its target UUID",
-                    staged.action().as_str()
+                    write.action().as_str()
                 )));
             }
-        };
-        match result {
-            Ok(response) => {
-                let created = (staged.action() == IpsWriteAction::Create)
-                    .then(|| created_uuid_from(&response))
-                    .flatten();
-                let identity = match &created {
-                    Some(uuid) => {
-                        // Set once per transaction; a second commit cannot occur.
-                        let _ = self.created_uuid.set(uuid.clone());
-                        format!(" as {uuid}")
-                    }
-                    None => String::new(),
-                };
-                Ok(CommitOutcome::Reconciled {
-                    succeeded: true,
-                    job_id: None,
-                    details: Some(format!(
-                        "SDC {} completed{identity}; nothing reaches a device until a policy using it is deployed",
-                        staged.action().as_str()
-                    )),
-                })
-            }
-            Err(SdcError::Cancelled | SdcError::Timeout | SdcError::MutationOutcomeUnknown) => {
-                Ok(CommitOutcome::Indeterminate {
-                    reason: "SDC IPS write was submitted but its outcome was not observed"
-                        .to_owned(),
-                })
-            }
-            Err(error) => {
-                if error.is_definitive_rejection() {
-                    self.refused_before_write.store(true, Ordering::SeqCst);
-                }
-                Err(error)
+            if !self.target_unchanged(write).await? {
+                return Err(SdcError::TargetDrifted);
             }
         }
+        *self.outcomes.lock().unwrap_or_else(PoisonError::into_inner) = staged
+            .iter()
+            .enumerate()
+            .map(|(index, write)| IpsWriteOutcome::pending(index, write))
+            .collect();
+        // From here the outcome is no longer knowably clean.
+        self.refused_before_write.store(false, Ordering::SeqCst);
+        let mut landed = Vec::new();
+        for (index, write) in staged.iter().enumerate() {
+            // Marked before the request is issued, so a commit future dropped
+            // mid-request leaves this write `unknown`, not `not_attempted`.
+            self.set_status(index, IpsWriteStatus::Unknown, None);
+            match self.send(write).await {
+                Ok(response) => {
+                    let created = (write.action() == IpsWriteAction::Create)
+                        .then(|| created_uuid_from(&response))
+                        .flatten();
+                    landed.push((write.action().as_str(), created.clone()));
+                    self.set_status(index, IpsWriteStatus::Applied, created);
+                }
+                Err(error) => {
+                    let definitive = error.is_definitive_rejection();
+                    if definitive {
+                        self.set_status(index, IpsWriteStatus::Rejected, None);
+                    }
+                    if !landed.is_empty() {
+                        // Earlier writes landed and SDC cannot undo them as a
+                        // unit, so this is neither a clean refusal (discard
+                        // would hide them) nor a success.
+                        return Ok(CommitOutcome::Indeterminate {
+                            reason: format!(
+                                "SDC IPS change set partially applied: writes 0-{} applied ({}); \
+                                 write {index} {} ({error}); {} later write(s) not attempted. \
+                                 Check SDC, then resolve this operation",
+                                index - 1,
+                                describe_landed(&landed),
+                                if definitive {
+                                    "was rejected"
+                                } else {
+                                    "has an unknown outcome"
+                                },
+                                staged.len() - index - 1,
+                            ),
+                        });
+                    }
+                    return match error {
+                        SdcError::Cancelled
+                        | SdcError::Timeout
+                        | SdcError::MutationOutcomeUnknown => Ok(CommitOutcome::Indeterminate {
+                            reason: "SDC IPS write was submitted but its outcome was not observed"
+                                .to_owned(),
+                        }),
+                        error => {
+                            if definitive {
+                                self.refused_before_write.store(true, Ordering::SeqCst);
+                            }
+                            Err(error)
+                        }
+                    };
+                }
+            }
+        }
+        let details = match landed.as_slice() {
+            // Unchanged from before multi-write change sets existed.
+            [(action, created)] => {
+                let identity = created
+                    .as_deref()
+                    .map(|uuid| format!(" as {uuid}"))
+                    .unwrap_or_default();
+                format!(
+                    "SDC {action} completed{identity}; nothing reaches a device until a policy \
+                     using it is deployed"
+                )
+            }
+            _ => format!(
+                "SDC IPS change set completed: {} writes applied ({}); nothing reaches a device \
+                 until a policy using them is deployed",
+                landed.len(),
+                describe_landed(&landed)
+            ),
+        };
+        Ok(CommitOutcome::Reconciled {
+            succeeded: true,
+            job_id: None,
+            details: Some(details),
+        })
     }
 
     /// Release a planned-but-uncommitted IPS write.
@@ -1915,6 +2231,133 @@ mod tests {
         ] {
             assert_eq!(created_uuid_from(&response), None, "{response}");
         }
+    }
+
+    fn rule_create(profile: &str, name: &str) -> SdcPreparedIpsWrite {
+        SdcPreparedIpsWrite::new_rule(
+            IpsWriteAction::Create,
+            profile.to_owned(),
+            None,
+            json!({
+                "name": name,
+                "ips_signature": [{ "uuid": "sig-1" }],
+                "then": { "action": "no-action" }
+            }),
+            Value::Null,
+        )
+        .expect("rule create")
+    }
+
+    fn rule_delete(profile: &str, uuid: &str) -> SdcPreparedIpsWrite {
+        SdcPreparedIpsWrite::new_rule(
+            IpsWriteAction::Delete,
+            profile.to_owned(),
+            Some(uuid.to_owned()),
+            Value::Null,
+            json!({ "uuid": uuid, "name": "OLD" }),
+        )
+        .expect("rule delete")
+    }
+
+    #[test]
+    fn a_one_write_change_set_keeps_its_own_plan_and_digest() {
+        // Change sets prepared before batches existed must still stage.
+        let write = rule_create("p-1", "R1");
+        assert_eq!(
+            super::ips_change_set_digest(std::slice::from_ref(&write)).expect("digest"),
+            write.plan_digest()
+        );
+        assert_eq!(
+            super::ips_change_set_plan(std::slice::from_ref(&write)),
+            write.plan()
+        );
+    }
+
+    #[test]
+    fn a_batch_digest_binds_every_write_and_their_order() {
+        let a = rule_create("p-1", "R1");
+        let b = rule_delete("p-1", "r-9");
+        let forward = super::ips_change_set_digest(&[a.clone(), b.clone()]).expect("digest");
+        let reversed = super::ips_change_set_digest(&[b.clone(), a.clone()]).expect("digest");
+        let dropped = super::ips_change_set_digest(std::slice::from_ref(&a)).expect("digest");
+        assert_ne!(forward, reversed, "order is part of the plan");
+        assert_ne!(forward, dropped, "dropping a write changes the digest");
+        let plan = super::ips_change_set_plan(&[a, b]);
+        assert_eq!(plan["operation"], json!("ips_write_batch"));
+        assert_eq!(plan["write_count"], json!(2));
+        assert_eq!(plan["writes"][1]["action"], json!("delete"));
+    }
+
+    #[test]
+    fn a_batch_carries_rule_writes_in_one_profile_with_distinct_targets() {
+        super::validate_ips_change_set(&[
+            rule_create("p-1", "R1"),
+            rule_create("p-1", "R2"),
+            rule_delete("p-1", "r-9"),
+        ])
+        .expect("a mixed rule batch in one profile");
+
+        let refused = |writes: &[SdcPreparedIpsWrite], why: &str| {
+            let error = super::validate_ips_change_set(writes).expect_err(why);
+            error.to_string()
+        };
+        assert!(refused(&[], "empty").contains("1-32"));
+        let too_many = (0..=super::MAX_IPS_BATCH_WRITES)
+            .map(|index| rule_create("p-1", &format!("R{index}")))
+            .collect::<Vec<_>>();
+        assert!(refused(&too_many, "33 writes").contains("1-32"));
+        assert!(
+            refused(
+                &[rule_create("p-1", "R1"), rule_create("p-2", "R2")],
+                "two profiles"
+            )
+            .contains("same profile")
+        );
+        assert!(
+            refused(
+                &[rule_delete("p-1", "r-9"), rule_delete("p-1", "r-9")],
+                "same target twice"
+            )
+            .contains("r-9")
+        );
+        let signature = SdcPreparedIpsWrite::new(
+            IpsWriteAction::Create,
+            IpsWriteFamily::Signature,
+            None,
+            json!({ "name": "CUSTOM-X" }),
+            Value::Null,
+        )
+        .expect("signature");
+        assert!(
+            refused(&[rule_create("p-1", "R1"), signature.clone()], "signature")
+                .contains("only rule and exempt-rule")
+        );
+        // A lone signature write is an ordinary one-write change set.
+        super::validate_ips_change_set(&[signature]).expect("single signature write");
+    }
+
+    #[test]
+    fn a_rule_and_an_exempt_rule_may_share_a_uuid() {
+        // They live in separate collections, so this is not a duplicate.
+        let exempt = SdcPreparedIpsWrite::new_exempt_rule(
+            IpsWriteAction::Delete,
+            "p-1".to_owned(),
+            Some("r-9".to_owned()),
+            Value::Null,
+            json!({ "uuid": "r-9", "name": "OLD" }),
+        )
+        .expect("exempt delete");
+        super::validate_ips_change_set(&[rule_delete("p-1", "r-9"), exempt])
+            .expect("distinct collections");
+    }
+
+    #[test]
+    fn a_tampered_write_inside_a_batch_is_refused() {
+        let writes = [rule_create("p-1", "R1"), rule_create("p-1", "R2")];
+        let mut stored = serde_json::to_value(&writes[1]).expect("serialize");
+        stored["request"]["then"]["action"] = json!("drop-connection");
+        let tampered: SdcPreparedIpsWrite = serde_json::from_value(stored).expect("deserialize");
+        assert!(super::validate_ips_change_set(&[writes[0].clone(), tampered]).is_err());
     }
 
     #[test]

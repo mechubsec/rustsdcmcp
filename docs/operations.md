@@ -500,6 +500,22 @@ when minting a token that should author IPS content.
   refuses the delete rather than passing on a partial read. The scan runs at
   prepare only, so a reference added between approval and apply is left to
   SDC's `409`. A delete sends no body.
+- **Several rule writes, one approval.** `prepare_sdc_ips_rule_batch` takes a
+  `profile_uuid` and 1-32 rule or exempt-rule writes (`action`, `family`,
+  `uuid`, `body`, as for `prepare_sdc_ips_write`). It plans them as one change
+  set with one digest over every write in order, so a single approval covers
+  the batch. Pass the result's `plan_digest` to `apply_sdc_ips_write` as
+  `expected_plan_digest`. `get_sdc_change_set_details` shows the whole batch
+  (`operation: ips_write_batch`). Two writes may not target the same rule.
+  Signatures, profiles, and signature or profile deletes are not batched.
+- **A batch is not atomic.** Apply re-checks every target, and any drift
+  refuses the batch before anything is sent. It then sends the writes in
+  order and stops at the first failure. If the first write is rejected,
+  nothing landed and the change set is discarded as for a single write. If a
+  later write fails, the earlier ones are in SDC. The outcome is then
+  `Indeterminate`, and `writes` lists each write as `applied`, `rejected`,
+  `unknown` or `not_attempted`. Check SDC, finish or undo the remainder with
+  new change sets, and resolve the operation.
 
 ### SDC commits twice per deploy
 
