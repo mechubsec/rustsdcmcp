@@ -31,8 +31,8 @@ I/O therefore protect the management plane rather than merely decorate it.
 
 ## Current status
 
-`rustsdcmcp` exposes **80 MCP tools** (v0.6.0 and `main`; v0.3.1 shipped 78; v0.2.0 shipped 74): 60 bounded read
-tools and 20 change-control tools. The surface
+`rustsdcmcp` exposes **81 MCP tools** on `main` (v0.6.0 shipped 80; v0.3.1 shipped 78; v0.2.0 shipped 74): 60 bounded read
+tools and 21 change-control tools. The surface
 covers the part of the SDC API that manages SRX devices and their policy; the
 rest of the product's API is deliberately out of scope.
 
