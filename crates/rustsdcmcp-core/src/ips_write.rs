@@ -33,9 +33,11 @@
 //! single profile, bound by one digest over every write's plan
 //! ([`ips_change_set_digest`]) and approved once. Each write keeps every guard
 //! and its own drift check. SDC has no transaction across requests, so apply
-//! sends them in order and stops at the first failure; a failure after a write
-//! has landed is reported as `Indeterminate` with each write's status, never
-//! as a clean refusal.
+//! sends them in order and stops at the first failure. A failure after a write
+//! has landed is never reported as a clean refusal: a definitive rejection is
+//! a known failure (`Failed`, clearable with `discard_sdc_operation`), and an
+//! unobserved outcome is `Indeterminate`. Either way `writes` gives each
+//! write's status.
 
 use crate::{ListRequest, ResourceKind, SdcClient, SdcError, prepared::canonical_digest};
 use async_trait::async_trait;
@@ -173,6 +175,15 @@ impl IpsWriteAction {
 /// approver can still read every write in the one plan they approve.
 pub const MAX_IPS_BATCH_WRITES: usize = 32;
 
+/// Most distinct signatures one IPS change set may reference, across all its
+/// writes.
+///
+/// Prepare reads each referenced signature once to confirm it exists, so this
+/// bounds those reads. Without it, 32 writes of up to 256 signatures each could
+/// mean 8,192 sequential reads. It equals a single rule's own limit, so a
+/// batch never reads more signatures than one maximal rule already may.
+pub const MAX_IPS_BATCH_SIGNATURES: usize = MAX_RULE_SIGNATURES;
+
 /// Plan discriminator of a change set carrying more than one IPS write.
 const BATCH_OPERATION: &str = "ips_write_batch";
 
@@ -269,6 +280,7 @@ pub fn validate_ips_change_set(writes: &[SdcPreparedIpsWrite]) -> Result<(), Sdc
     let [first, _, ..] = writes else {
         return Ok(());
     };
+    ensure_batch_signature_budget(writes.iter().map(SdcPreparedIpsWrite::request))?;
     // Rule and exempt-rule UUIDs live in separate collections.
     let mut targets = BTreeSet::new();
     for (index, write) in writes.iter().enumerate() {
@@ -681,6 +693,32 @@ fn created_uuid_from(response: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|uuid| !uuid.is_empty())
         .map(str::to_owned)
+}
+
+/// Refuse a change set whose bodies reference more than
+/// [`MAX_IPS_BATCH_SIGNATURES`] distinct signatures in total.
+///
+/// Takes raw bodies so prepare can run it before its first SDC read.
+///
+/// # Errors
+///
+/// Returns an error naming the count when the budget is exceeded.
+pub fn ensure_batch_signature_budget<'a>(
+    bodies: impl IntoIterator<Item = &'a Value>,
+) -> Result<(), SdcError> {
+    let distinct = bodies
+        .into_iter()
+        .flat_map(rule_signature_uuids)
+        .collect::<BTreeSet<_>>()
+        .len();
+    if distinct > MAX_IPS_BATCH_SIGNATURES {
+        return Err(SdcError::PreparedChange(format!(
+            "an IPS change set may reference at most {MAX_IPS_BATCH_SIGNATURES} distinct \
+             signatures across its writes; this one references {distinct}. Split it into \
+             smaller change sets"
+        )));
+    }
+    Ok(())
 }
 
 /// `ips_create as <uuid>, ips_update, …` for the writes that landed.
@@ -1191,9 +1229,9 @@ pub struct IpsApplyResult {
     /// `None` for update and delete, for a create whose response carried no
     /// UUID, and for a change set of several writes (see `writes`).
     pub created_uuid: Option<String>,
-    /// What happened to each write, in send order. After an `Indeterminate`
-    /// outcome this says which writes landed, which did not, and which need
-    /// checking in SDC.
+    /// What happened to each write, in send order. After a partial failure
+    /// this says which writes landed, which did not, and which need checking
+    /// in SDC.
     pub writes: Vec<IpsWriteOutcome>,
 }
 
@@ -1403,6 +1441,17 @@ impl DeviceTransaction for SdcIpsTransaction {
                     write.action().as_str()
                 )));
             }
+            // The client's own local checks, for every write before the first
+            // request: a write it would refuse must not fail after an earlier
+            // write landed and be reported as sent.
+            SdcClient::check_ips_write(
+                write.family(),
+                write.profile_uuid(),
+                write.uuid(),
+                (write.action() != IpsWriteAction::Delete).then(|| write.request()),
+            )?;
+        }
+        for write in staged {
             if !self.target_unchanged(write).await? {
                 return Err(SdcError::TargetDrifted);
             }
@@ -1434,22 +1483,39 @@ impl DeviceTransaction for SdcIpsTransaction {
                     }
                     if !landed.is_empty() {
                         // Earlier writes landed and SDC cannot undo them as a
-                        // unit, so this is neither a clean refusal (discard
-                        // would hide them) nor a success.
+                        // unit, so this is not a clean refusal: the record is
+                        // never released as "nothing written".
+                        let summary = format!(
+                            "SDC IPS change set partially applied: writes 0-{} applied ({}); \
+                             write {index} {} ({error}); {} later write(s) not attempted",
+                            index - 1,
+                            describe_landed(&landed),
+                            if definitive {
+                                "was rejected"
+                            } else {
+                                "has an unknown outcome"
+                            },
+                            staged.len() - index - 1,
+                        );
+                        if definitive {
+                            // Every write's fate is known, so this is a known
+                            // failure, not an unknown outcome. It records the
+                            // operation `Failed`, which `discard_sdc_operation`
+                            // can clear once the operator has finished or
+                            // undone the remainder; `Indeterminate` could not
+                            // be cleared by any tool here.
+                            return Ok(CommitOutcome::Reconciled {
+                                succeeded: false,
+                                job_id: None,
+                                details: Some(format!(
+                                    "{summary}. The applied writes remain in SDC. Finish or \
+                                     undo the remainder with new change sets, then clear this \
+                                     operation with discard_sdc_operation"
+                                )),
+                            });
+                        }
                         return Ok(CommitOutcome::Indeterminate {
-                            reason: format!(
-                                "SDC IPS change set partially applied: writes 0-{} applied ({}); \
-                                 write {index} {} ({error}); {} later write(s) not attempted. \
-                                 Check SDC, then resolve this operation",
-                                index - 1,
-                                describe_landed(&landed),
-                                if definitive {
-                                    "was rejected"
-                                } else {
-                                    "has an unknown outcome"
-                                },
-                                staged.len() - index - 1,
-                            ),
+                            reason: format!("{summary}. Check SDC, then resolve this operation"),
                         });
                     }
                     return match error {

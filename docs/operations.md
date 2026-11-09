@@ -506,16 +506,32 @@ when minting a token that should author IPS content.
   set with one digest over every write in order, so a single approval covers
   the batch. Pass the result's `plan_digest` to `apply_sdc_ips_write` as
   `expected_plan_digest`. `get_sdc_change_set_details` shows the whole batch
-  (`operation: ips_write_batch`). Two writes may not target the same rule.
-  Signatures, profiles, and signature or profile deletes are not batched.
-- **A batch is not atomic.** Apply re-checks every target, and any drift
-  refuses the batch before anything is sent. It then sends the writes in
-  order and stops at the first failure. If the first write is rejected,
-  nothing landed and the change set is discarded as for a single write. If a
-  later write fails, the earlier ones are in SDC. The outcome is then
-  `Indeterminate`, and `writes` lists each write as `applied`, `rejected`,
-  `unknown` or `not_attempted`. Check SDC, finish or undo the remainder with
-  new change sets, and resolve the operation.
+  (`operation: ips_write_batch`) with the same `plan_digest`, so it can be
+  recovered if the prepare response was lost. Two writes may not target the
+  same rule, and the writes together may reference at most 256 distinct
+  signatures (prepare reads each one, and refuses a larger batch before its
+  first read). Signatures, profiles, and signature or profile deletes are not
+  batched.
+- **A batch is not atomic.** Before sending anything, apply runs the client's
+  own body checks on every write and re-checks every target, so a write the
+  client would refuse, or drift on any target, refuses the batch with nothing
+  written. It then sends the writes in order and stops at the first failure,
+  and `writes` lists each write as `applied`, `rejected`, `unknown` or
+  `not_attempted`.
+  - First write rejected: nothing landed, and the change set is discarded as
+    for a single write.
+  - A later write rejected: the earlier writes are in SDC, and every write's
+    fate is known. The outcome is `reconciled` with `succeeded: false` and the
+    operation is recorded `Failed`. It blocks further applies on the tenant
+    until cleared. Finish or undo the remainder with new change sets, then
+    clear it with `discard_sdc_operation`, passing the operation id and the
+    batch's `plan_digest` as the fingerprint (see "Recovering from a failed
+    deploy"). The discard clears the block only; the applied writes stay in
+    SDC and the failure stays on record.
+  - A later write timed out, was cancelled, or got an error that does not
+    prove it was refused: its outcome is unknown, so the operation is
+    `Indeterminate`, as a single write's would be. No tool here clears an
+    `Indeterminate` operation yet.
 
 ### SDC commits twice per deploy
 

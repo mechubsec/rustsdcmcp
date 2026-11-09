@@ -720,6 +720,10 @@ impl ChangeManager {
                 "an IPS rule batch carries 1-32 writes",
             ));
         }
+        // Bound the signature existence reads below before issuing any read.
+        crate::ensure_batch_signature_budget(
+            writes.iter().filter_map(|write| write.body.as_ref()),
+        )?;
         // Existence check first, so a wrong profile fails before any rule read.
         self.client
             .get_ips_object(IpsWriteFamily::Profile, None, &profile_uuid, cancellation)
@@ -2577,11 +2581,26 @@ impl ChangeManager {
             }
             // An IPS change set of several writes is approved as a whole, so
             // the approver sees every write, in the order apply sends them.
-            Some("ips_write") if record.actions.len() > 1 => Ok(serde_json::json!({
-                "operation": "ips_write_batch",
-                "write_count": record.actions.len(),
-                "writes": record.actions,
-            })),
+            // `plan_digest` is the whole-set digest apply takes as
+            // `expected_plan_digest`; each write's own digest would be refused.
+            // It is recomputed from the stored writes, so a caller that lost
+            // the prepare response can still apply.
+            Some("ips_write") if record.actions.len() > 1 => {
+                let writes: Vec<SdcPreparedIpsWrite> = serde_json::from_value(Value::Array(
+                    record.actions.clone(),
+                ))
+                .map_err(|error| {
+                    SdcError::ChangeControl(format!(
+                        "failed to deserialize prepared IPS writes: {error}"
+                    ))
+                })?;
+                Ok(serde_json::json!({
+                    "operation": "ips_write_batch",
+                    "plan_digest": crate::ips_change_set_digest(&writes)?,
+                    "write_count": writes.len(),
+                    "writes": record.actions,
+                }))
+            }
             // Every other kind is returned as staged. Their before-state comes
             // from endpoints with no read-path allowlist, so there is nothing
             // to project and inventing one here would diverge from the reads.
@@ -6101,6 +6120,11 @@ mod tests {
             .expect("details");
         assert_eq!(details["operation"], json!("ips_write_batch"));
         assert_eq!(details["writes"].as_array().map(Vec::len), Some(3));
+        assert_eq!(
+            details["plan_digest"],
+            json!(prepared.plan_digest),
+            "a caller that lost the prepare response can recover the apply digest"
+        );
 
         let applied = manager
             .apply_ips_write(
@@ -6155,11 +6179,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_batch_failing_after_a_write_landed_is_indeterminate_not_discarded() {
+    async fn a_known_partial_batch_is_a_failure_the_operator_can_clear() {
         let (base_url, server, seen) =
             batch_server(Arc::new(std::sync::Mutex::new(rule_state())), Some(1)).await;
         let (manager, _) = ips_manager(&base_url);
         let (prepared, cancellation) = prepare_and_approve_batch(&manager).await;
+        let plan_digest = prepared.plan_digest.clone();
 
         let applied = manager
             .apply_ips_write(
@@ -6172,11 +6197,49 @@ mod tests {
             )
             .await
             .expect("a partial apply is reported, not hidden behind an error");
-        let CommitOutcome::Indeterminate { reason } = &applied.outcome else {
-            panic!("expected indeterminate, got {:?}", applied.outcome);
+        // Every write's fate is known, so this is a failure, not an unknown
+        // outcome: `Indeterminate` could not be cleared by any tool here.
+        let CommitOutcome::Reconciled {
+            succeeded: false,
+            details: Some(reason),
+            ..
+        } = &applied.outcome
+        else {
+            panic!("expected a reconciled failure, got {:?}", applied.outcome);
         };
         assert!(reason.contains("partially applied"), "{reason}");
         assert!(reason.contains("ips_create as new-0"), "{reason}");
+        assert!(reason.contains("discard_sdc_operation"), "{reason}");
+
+        // The failed operation blocks the next apply until it is cleared...
+        let (next, _) = prepare_and_approve_batch(&manager).await;
+        let attribution = Attribution::stdio();
+        let apply_next = || {
+            manager.apply_ips_write(
+                next.change_set.change_set_id.clone(),
+                "alice".to_owned(),
+                next.change_set.digest.clone(),
+                next.plan_digest.clone(),
+                &attribution,
+                &cancellation,
+            )
+        };
+        apply_next()
+            .await
+            .expect_err("an unreconciled operation blocks the tenant");
+        // ...and the owner can clear it with the existing discard path.
+        manager
+            .discard(
+                applied.operation_id.clone(),
+                "alice".to_owned(),
+                plan_digest,
+                &cancellation,
+            )
+            .await
+            .expect("a known partial failure is discardable");
+        apply_next()
+            .await
+            .expect("the tenant is unblocked after the discard");
         assert_eq!(
             applied
                 .writes
@@ -6189,7 +6252,99 @@ mod tests {
                 crate::IpsWriteStatus::NotAttempted,
             ]
         );
-        assert_eq!(writes(&seen).len(), 2, "apply stops at the first failure");
+        // Two from the partial batch (it stops at the failure), three from the
+        // batch applied after the discard.
+        assert_eq!(writes(&seen).len(), 5);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_write_the_client_would_refuse_stops_the_batch_before_any_write() {
+        let (base_url, server, seen) =
+            batch_server(Arc::new(std::sync::Mutex::new(rule_state())), None).await;
+        let (manager, _) = ips_manager(&base_url);
+        let cancellation = CancellationToken::new();
+        let mut writes_in = batch_writes();
+        // Passes the envelope guards, but the client refuses to send a body
+        // carrying a redaction marker.
+        writes_in[1].body = Some(json!({
+            "name": "EXEMPT-A",
+            "description": "copied from a [REDACTED] read",
+            "ips_signature": [{"uuid": "sig-a"}]
+        }));
+        let prepared = manager
+            .prepare_ips_rule_batch(
+                "alice".to_owned(),
+                "p-1".to_owned(),
+                writes_in,
+                &cancellation,
+            )
+            .await
+            .expect("prepare accepts it");
+        manager
+            .approve(
+                prepared.change_set.change_set_id.clone(),
+                "bob".to_owned(),
+                prepared.change_set.digest.clone(),
+                mecmcp_audit::ActorType::Human,
+            )
+            .await
+            .expect("approve");
+        let error = manager
+            .apply_ips_write(
+                prepared.change_set.change_set_id,
+                "alice".to_owned(),
+                prepared.change_set.digest,
+                prepared.plan_digest,
+                &Attribution::stdio(),
+                &cancellation,
+            )
+            .await
+            .expect_err("the local refusal must surface before anything is sent");
+        assert!(error.to_string().contains("discarded"), "{error}");
+        assert!(
+            writes(&seen).is_empty(),
+            "write 0 must not land ahead of a write that can never be sent"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_batch_over_the_signature_budget_is_refused_before_any_read() {
+        let (base_url, server, seen) =
+            batch_server(Arc::new(std::sync::Mutex::new(rule_state())), None).await;
+        let (manager, _) = ips_manager(&base_url);
+        // Two rules of 200 distinct signatures each: each within a rule's own
+        // limit, 400 together.
+        let rule = |offset: usize| {
+            json!({
+                "action": "create",
+                "family": "rule",
+                "body": {
+                    "name": format!("R{offset}"),
+                    "ips_signature": (offset..offset + 200)
+                        .map(|n| json!({"uuid": format!("sig-{n}")}))
+                        .collect::<Vec<_>>(),
+                    "then": {"action": "no-action"}
+                }
+            })
+        };
+        let writes_in: Vec<IpsRuleBatchWrite> =
+            serde_json::from_value(json!([rule(0), rule(200)])).expect("writes");
+        let error = manager
+            .prepare_ips_rule_batch(
+                "alice".to_owned(),
+                "p-1".to_owned(),
+                writes_in,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("400 distinct signatures exceed the batch budget");
+        assert!(error.to_string().contains("400"), "{error}");
+        assert!(
+            reads(&seen).is_empty(),
+            "the budget is checked before any read"
+        );
         server.abort();
     }
 
