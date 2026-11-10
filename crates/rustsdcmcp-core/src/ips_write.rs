@@ -1508,9 +1508,9 @@ impl DeviceTransaction for SdcIpsTransaction {
                                 succeeded: false,
                                 job_id: None,
                                 details: Some(format!(
-                                    "{summary}. The applied writes remain in SDC. Finish or \
-                                     undo the remainder with new change sets, then clear this \
-                                     operation with discard_sdc_operation"
+                                    "{summary}. The applied writes remain in SDC. Clear this \
+                                     operation with discard_sdc_operation, then finish or undo \
+                                     the remainder with new change sets"
                                 )),
                             });
                         }

@@ -25,8 +25,9 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
   failure. The new `writes` field gives each write's status (`applied`,
   `rejected`, `unknown`, `not_attempted`). SDC cannot undo earlier writes as a
   unit, so a later write's definitive rejection records the operation
-  `Failed`. The owner clears it with `discard_sdc_operation` once the remainder
-  is finished or undone. A later write with an unknown outcome is
+  `Failed`. The owner clears it with `discard_sdc_operation`, which reverts
+  nothing and keeps the failure details, then finishes or undoes the
+  remainder. A later write with an unknown outcome is
   `Indeterminate`, as for a single write. `get_sdc_change_set_details` returns
   the batch's `plan_digest`. Signatures, profiles, and deletes that need a
   reference scan stay one per change set. Like every write tool, it is

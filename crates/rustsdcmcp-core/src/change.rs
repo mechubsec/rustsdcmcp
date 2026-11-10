@@ -11,8 +11,9 @@ use async_trait::async_trait;
 use mecmcp_audit::Attribution;
 use mecmcp_changeset::{
     ApprovalDigestKey, ChangeSetOutput, ChangesetCoordinator, CommitOptions, CommitOutcome,
-    DeviceTransaction, OperationLimits, RollbackOutcome, RollbackRef, StagedRecovery,
-    UnlockOutcome, mutation_policy_signature,
+    CoordinatorError, DeviceTransaction, LifecycleState, OperationLimits, OperationRecord,
+    RollbackOutcome, RollbackRef, StagedRecovery, UnlockOutcome, mutation_policy_signature,
+    require_operation_fingerprint,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -2508,6 +2509,12 @@ impl ChangeManager {
         expected_fingerprint: String,
         cancellation: &CancellationToken,
     ) -> Result<String, SdcError> {
+        if let Some(fingerprint) = self
+            .clear_failed_ips_write(&operation_id, &owner, &expected_fingerprint, cancellation)
+            .await?
+        {
+            return Ok(fingerprint);
+        }
         let transaction = SdcTransaction::new(
             self.client.clone(),
             expected_fingerprint.clone(),
@@ -2524,6 +2531,91 @@ impl ChangeManager {
             )
             .await
             .map_err(|error| SdcError::ChangeControl(error.to_string()))
+    }
+
+    /// Clear a `Failed` IPS write operation without the generic discard's
+    /// revert, keeping its failure details.
+    ///
+    /// SDC applies IPS writes directly, so there is nothing to revert: after a
+    /// partially applied batch the earlier writes stay in SDC. The generic
+    /// discard would record "candidate reverted" over the details that name
+    /// them. Returns `None` for every other operation, which takes the generic
+    /// path and its errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdcError::ChangeControl`] when the fingerprint does not match,
+    /// the operation was settled while this waited for the tenant guard, or the
+    /// state cannot be persisted.
+    async fn clear_failed_ips_write(
+        &self,
+        operation_id: &str,
+        owner: &str,
+        expected_fingerprint: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<String>, SdcError> {
+        let is_failed_ips_write = |record: &OperationRecord| {
+            record.state == LifecycleState::Failed
+                && record
+                    .actions
+                    .first()
+                    .and_then(|action| action.get("operation"))
+                    .and_then(Value::as_str)
+                    == Some("ips_write")
+        };
+        match self
+            .coordinator
+            .record(operation_id, owner, &self.tenant)
+            .await
+        {
+            Ok(record) if is_failed_ips_write(&record) => {}
+            _ => return Ok(None),
+        }
+        let _guard = self
+            .coordinator
+            .device_guard(&self.tenant, cancellation)
+            .await
+            .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
+        // The guard can win a tie with cancellation; a cancelled caller must not
+        // unblock the tenant behind its back.
+        if cancellation.is_cancelled() {
+            return Err(SdcError::ChangeControl(
+                CoordinatorError::new("device", "operation cancelled").to_string(),
+            ));
+        }
+        // Re-read under the guard, as the generic discard does: another discard
+        // may have settled the operation while this one waited.
+        let mut record = self
+            .coordinator
+            .record(operation_id, owner, &self.tenant)
+            .await
+            .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
+        if !is_failed_ips_write(&record) {
+            return Err(SdcError::ChangeControl(
+                CoordinatorError::new(
+                    "operation_id",
+                    "operation cannot be discarded in its current state",
+                )
+                .to_string(),
+            ));
+        }
+        // SDC has no candidate to read, so the expected fingerprint stands in
+        // for the actual one, as in `SdcTransaction::fingerprint`; this checks
+        // it against the operation's own.
+        require_operation_fingerprint(&record, expected_fingerprint, expected_fingerprint)
+            .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
+        let failure = record.details.take().unwrap_or_default();
+        record.details = Some(format!(
+            "cleared by {owner} without a revert; any write recorded as applied remains in \
+             SDC. {failure}"
+        ));
+        record.state = LifecycleState::Discarded;
+        record.config_lock_held = false;
+        self.coordinator
+            .update(record.clone())
+            .await
+            .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
+        Ok(Some(record.current))
     }
 
     /// Return current shared change-set state.
@@ -6227,6 +6319,21 @@ mod tests {
         apply_next()
             .await
             .expect_err("an unreconciled operation blocks the tenant");
+        // A cancelled discard changes nothing, even when the tenant guard wins
+        // its race with cancellation (`select!` picks either at random).
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        for _ in 0..32 {
+            manager
+                .discard(
+                    applied.operation_id.clone(),
+                    "alice".to_owned(),
+                    plan_digest.clone(),
+                    &cancelled,
+                )
+                .await
+                .expect_err("a cancelled discard leaves the operation blocking");
+        }
         // ...and the owner can clear it with the existing discard path.
         manager
             .discard(
@@ -6237,6 +6344,17 @@ mod tests {
             )
             .await
             .expect("a known partial failure is discardable");
+        // The cleared record keeps the failure and does not claim a revert.
+        let record = manager
+            .coordinator
+            .record(&applied.operation_id, "alice", &manager.tenant)
+            .await
+            .expect("the cleared operation stays on record");
+        assert_eq!(record.state, LifecycleState::Discarded);
+        let details = record.details.unwrap_or_default();
+        assert!(details.contains("partially applied"), "{details}");
+        assert!(details.contains("remains in SDC"), "{details}");
+        assert!(!details.contains("candidate reverted"), "{details}");
         apply_next()
             .await
             .expect("the tenant is unblocked after the discard");

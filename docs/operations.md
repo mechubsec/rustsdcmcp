@@ -523,11 +523,12 @@ when minting a token that should author IPS content.
   - A later write rejected: the earlier writes are in SDC, and every write's
     fate is known. The outcome is `reconciled` with `succeeded: false` and the
     operation is recorded `Failed`. It blocks further applies on the tenant
-    until cleared. Finish or undo the remainder with new change sets, then
-    clear it with `discard_sdc_operation`, passing the operation id and the
-    batch's `plan_digest` as the fingerprint (see "Recovering from a failed
-    deploy"). The discard clears the block only; the applied writes stay in
-    SDC and the failure stays on record.
+    until cleared, so clear it first with `discard_sdc_operation`, passing the
+    operation id and the batch's `plan_digest` as the fingerprint (see
+    "Recovering from a failed deploy"). Then finish or undo the remainder with
+    new change sets. The discard clears the block only and reverts nothing:
+    the applied writes stay in SDC, and the operation is recorded `discarded`
+    with its failure details kept.
   - A later write timed out, was cancelled, or got an error that does not
     prove it was refused: its outcome is unknown, so the operation is
     `Indeterminate`, as a single write's would be. No tool here clears an
