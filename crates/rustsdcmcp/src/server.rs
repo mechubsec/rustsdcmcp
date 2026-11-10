@@ -19,11 +19,11 @@ use rmcp::{
 use rustsdcmcp_core::{
     ChangeManager, DeviceConfigSection, FirewallLayoutChange, FirewallLayoutRequest,
     FirewallRuleLayoutOperation, FirewallRuleLocation, FirewallRuleScope,
-    FirewallRuleWriteOperation, ImageJob, IpsWriteAction, IpsWriteFamily, ListPage, ListRequest,
-    NatWriteOperation, ObjectWriteAction, PolicyOperation, ResourceKind, SdcClient, SdcError,
-    WritableResource, apply_oob_drift, page_list, page_paired_lists, project_ca_certificates,
-    project_license, project_licenses, project_local_certificates, project_users_and_roles,
-    redact_rma_state, redact_secrets, redact_secrets_keeping_ips_patterns,
+    FirewallRuleWriteOperation, ImageJob, IpsRuleBatchWrite, IpsWriteAction, IpsWriteFamily,
+    ListPage, ListRequest, NatWriteOperation, ObjectWriteAction, PolicyOperation, ResourceKind,
+    SdcClient, SdcError, WritableResource, apply_oob_drift, page_list, page_paired_lists,
+    project_ca_certificates, project_license, project_licenses, project_local_certificates,
+    project_users_and_roles, redact_rma_state, redact_secrets, redact_secrets_keeping_ips_patterns,
     redact_secrets_keeping_ips_signature_names,
 };
 use schemars::JsonSchema;
@@ -100,6 +100,7 @@ pub const KNOWN_TOOLS: &[&str] = &[
     "prepare_sdc_object_write",
     "apply_sdc_object_write",
     "prepare_sdc_ips_write",
+    "prepare_sdc_ips_rule_batch",
     "apply_sdc_ips_write",
     "prepare_sdc_nat_write",
     "apply_sdc_nat_write",
@@ -129,6 +130,7 @@ pub const WRITE_TOOLS: &[&str] = &[
     "prepare_sdc_object_write",
     "apply_sdc_object_write",
     "prepare_sdc_ips_write",
+    "prepare_sdc_ips_rule_batch",
     "apply_sdc_ips_write",
     "prepare_sdc_nat_write",
     "apply_sdc_nat_write",
@@ -171,6 +173,7 @@ pub const WILDCARD_EXCLUDED_TOOLS: &[&str] = &[
     "prepare_sdc_object_write",
     "apply_sdc_object_write",
     "prepare_sdc_ips_write",
+    "prepare_sdc_ips_rule_batch",
     "apply_sdc_ips_write",
     "prepare_sdc_nat_write",
     "apply_sdc_nat_write",
@@ -1293,7 +1296,25 @@ pub struct PrepareIpsArgs {
     pub body: Option<Value>,
 }
 
-/// Arguments for applying one approved IPS write.
+/// Arguments for planning several IPS rule and exempt-rule writes inside one
+/// profile as a single change set.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PrepareIpsRuleBatchArgs {
+    /// Configured tenant alias.
+    pub tenant: String,
+    /// Parent IPS profile UUID shared by every write.
+    pub profile_uuid: String,
+    /// 1-32 writes, sent by apply in this order. Each is `{action, family,
+    /// uuid?, body?}` with the same rules as `prepare_sdc_ips_write`:
+    /// `family` is `rule` or `exempt_rule`; `uuid` is required for update and
+    /// delete and absent for create; `body` is the full `IPSRuleInput` or
+    /// `IPSExemptRuleInput` for create and update and absent for delete. Two
+    /// writes may not target the same rule.
+    pub writes: Vec<IpsRuleBatchWrite>,
+}
+
+/// Arguments for applying one approved IPS change set.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApplyIpsArgs {
@@ -1303,7 +1324,9 @@ pub struct ApplyIpsArgs {
     pub change_set_id: String,
     /// Exact approved plan digest.
     pub expected_digest: String,
-    /// Exact plan digest returned by prepare.
+    /// Exact plan digest returned by prepare: `prepared_change.plan_digest`
+    /// from `prepare_sdc_ips_write`, or `plan_digest` from
+    /// `prepare_sdc_ips_rule_batch`.
     pub expected_plan_digest: String,
     /// Optional external ticket or change reference.
     #[serde(default)]
@@ -3763,8 +3786,42 @@ impl SdcHandler {
     }
 
     #[tool(
+        name = "prepare_sdc_ips_rule_batch",
+        description = "Plan 1-32 IPS rule and exempt-rule creates, updates, and deletes inside one IPS profile as a single digest-bound change set, approved once and applied with apply_sdc_ips_write. This does not write. Each write follows the same rules and guards as prepare_sdc_ips_write; the profile and every referenced signature must already exist, and no two writes may target the same rule. Signatures, profiles, and deletes that need a reference scan are not batched; use prepare_sdc_ips_write for those. Apply re-checks every target before sending anything, then sends the writes in order and stops at the first failure. SDC cannot undo earlier writes as a unit, so a later write's rejection leaves a failed operation, cleared with discard_sdc_operation once the remainder is handled, and `writes` gives each write's status. Together the writes may reference at most 256 distinct signatures. SDC IPS rules and exempt rules carry no zone or address match. A completed write changes SDC only; nothing reaches a device until a policy using it is deployed."
+    )]
+    async fn prepare_sdc_ips_rule_batch(
+        &self,
+        Parameters(args): Parameters<PrepareIpsRuleBatchArgs>,
+        extensions: Extensions,
+        cancellation: CancellationToken,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let caller = caller_from_extensions::<NoGrant>(&extensions);
+        let mut audit = audit_scope(
+            caller,
+            "prepare_sdc_ips_rule_batch",
+            "prepare",
+            vec![args.tenant.clone()],
+        );
+        if let Err(error) = self.authorize(caller, "prepare_sdc_ips_rule_batch", &args.tenant) {
+            audit.deny("scope");
+            return Ok(tool_error(error));
+        }
+        Ok(finish_redacted_ips(
+            audit,
+            self.changes
+                .prepare_ips_rule_batch(
+                    owner(caller),
+                    args.profile_uuid,
+                    args.writes,
+                    &cancellation,
+                )
+                .await,
+        ))
+    }
+
+    #[tool(
         name = "apply_sdc_ips_write",
-        description = "Apply only an independently approved SDC IPS signature, profile, rule, or exempt-rule write, refusing it if the target changed since it was planned. This changes SDC only; deploy a policy to reach devices."
+        description = "Apply only an independently approved SDC IPS change set from prepare_sdc_ips_write or prepare_sdc_ips_rule_batch, refusing it if any target changed since it was planned. A batch is sent in order and stops at the first failure; `writes` reports each write's status. This changes SDC only; deploy a policy to reach devices."
     )]
     async fn apply_sdc_ips_write(
         &self,
@@ -4121,7 +4178,10 @@ impl SdcHandler {
 fn is_ips_write(prepared: &Result<Value, SdcError>) -> bool {
     matches!(
         prepared,
-        Ok(value) if value.get("operation").and_then(Value::as_str) == Some("ips_write")
+        Ok(value) if matches!(
+            value.get("operation").and_then(Value::as_str),
+            Some("ips_write" | "ips_write_batch")
+        )
     )
 }
 
@@ -4287,6 +4347,10 @@ mod tests {
             "api_key": "real-secret-value"
         });
         assert!(is_ips_write(&Ok(value.clone())));
+        assert!(is_ips_write(&Ok(serde_json::json!({
+            "operation": "ips_write_batch",
+            "writes": [value.clone(), value.clone()]
+        }))));
         assert!(!is_ips_write(&Ok(
             serde_json::json!({"operation": "object_write"})
         )));
@@ -4520,7 +4584,11 @@ mod tests {
     /// must not reach it, and stdio must not reach it at all.
     #[test]
     fn ips_writes_need_their_own_named_grant() {
-        let ips_tools = ["prepare_sdc_ips_write", "apply_sdc_ips_write"];
+        let ips_tools = [
+            "prepare_sdc_ips_write",
+            "prepare_sdc_ips_rule_batch",
+            "apply_sdc_ips_write",
+        ];
 
         let object_only = caller(
             ScopeSet::Allowlist(vec!["tenant-a".to_owned()]),
@@ -4566,6 +4634,43 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn prepare_ips_rule_batch_args_take_only_rule_families() {
+        let ok: PrepareIpsRuleBatchArgs = serde_json::from_value(serde_json::json!({
+            "tenant": "production",
+            "profile_uuid": "p-1",
+            "writes": [
+                {"action": "create", "family": "rule",
+                 "body": {"name": "R", "ips_signature": [{"uuid": "s-1"}], "then": {"action": "no-action"}}},
+                {"action": "update", "family": "exempt_rule", "uuid": "x-1",
+                 "body": {"name": "E", "ips_signature": [{"uuid": "s-1"}]}},
+                {"action": "delete", "family": "rule", "uuid": "r-9"}
+            ]
+        }))
+        .expect("mixed batch");
+        assert_eq!(ok.writes.len(), 3);
+        assert_eq!(ok.writes[2].action, IpsWriteAction::Delete);
+        assert!(ok.writes[2].body.is_none());
+
+        for bad in [
+            // Signatures and profiles are not batched.
+            serde_json::json!({"tenant": "t", "profile_uuid": "p", "writes": [
+                {"action": "create", "family": "signature", "body": {"name": "S"}}]}),
+            serde_json::json!({"tenant": "t", "profile_uuid": "p", "writes": [
+                {"action": "delete", "family": "profile", "uuid": "p"}]}),
+            // The profile is given once, never per write.
+            serde_json::json!({"tenant": "t", "profile_uuid": "p", "writes": [
+                {"action": "delete", "family": "rule", "uuid": "r", "profile_uuid": "q"}]}),
+            serde_json::json!({"tenant": "t", "writes": [
+                {"action": "delete", "family": "rule", "uuid": "r"}]}),
+        ] {
+            assert!(
+                serde_json::from_value::<PrepareIpsRuleBatchArgs>(bad.clone()).is_err(),
+                "{bad} was accepted"
+            );
+        }
     }
 
     #[test]

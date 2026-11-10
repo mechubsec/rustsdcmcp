@@ -11,6 +11,31 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 
 ## Unreleased
 
+### Added
+
+- `prepare_sdc_ips_rule_batch`: plan 1-32 IPS rule and exempt-rule creates,
+  updates and deletes inside one profile as a single change set, bound by one
+  digest over every write in order, and approved once. It is applied through
+  the existing `apply_sdc_ips_write`. Before, building out a profile took one
+  prepare → approve → apply round trip per rule. Every write keeps the guards
+  and drift check of `prepare_sdc_ips_write`. The writes together may
+  reference at most 256 distinct signatures, checked before prepare's first
+  read. Apply runs the client's body checks and re-checks every target before
+  sending anything, then sends the writes in order and stops at the first
+  failure. The new `writes` field gives each write's status (`applied`,
+  `rejected`, `unknown`, `not_attempted`). SDC cannot undo earlier writes as a
+  unit, so a later write's definitive rejection records the operation
+  `Failed`. The owner clears it with `discard_sdc_operation`, which reverts
+  nothing and keeps the failure details, then finishes or undoes the
+  remainder. A later write with an unknown outcome is
+  `Indeterminate`, as for a single write. `get_sdc_change_set_details` returns
+  the batch's `plan_digest`. Signatures, profiles, and deletes that need a
+  reference scan stay one per change set. Like every write tool, it is
+  excluded from a wildcard tool scope, so a token must name it.
+- `apply_sdc_ips_write` results gain `writes` (per-write status and any
+  created UUID), and `validation` gains `write_count`. A one-write change set's
+  plan, digest, and other fields are unchanged.
+
 ### Changed
 
 - Refreshed the vendored SDC OpenAPI export and `docs/sdc-api/endpoints.md`

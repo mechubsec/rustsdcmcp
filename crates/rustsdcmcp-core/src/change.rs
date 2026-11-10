@@ -1,18 +1,19 @@
 //! SDC adapter for the shared preview-bound, two-person change lifecycle.
 
 use crate::{
-    DeployRequest, IpsApplyResult, IpsPrepareResult, IpsWriteAction, IpsWriteFamily, JobStatus,
-    NatValidationReport, NatWriteOperation, ObjectValidationReport, ObjectWriteAction,
-    PolicyOperation, SdcClient, SdcError, SdcIpsTransaction, SdcNatTransaction,
-    SdcObjectTransaction, SdcPreparedChange, SdcPreparedIpsWrite, SdcPreparedNatWrite,
-    SdcPreparedObjectWrite, WritableResource,
+    DeployRequest, IpsApplyResult, IpsBatchPrepareResult, IpsPrepareResult, IpsRuleBatchWrite,
+    IpsWriteAction, IpsWriteFamily, JobStatus, NatValidationReport, NatWriteOperation,
+    ObjectValidationReport, ObjectWriteAction, PolicyOperation, SdcClient, SdcError,
+    SdcIpsTransaction, SdcNatTransaction, SdcObjectTransaction, SdcPreparedChange,
+    SdcPreparedIpsWrite, SdcPreparedNatWrite, SdcPreparedObjectWrite, WritableResource,
 };
 use async_trait::async_trait;
 use mecmcp_audit::Attribution;
 use mecmcp_changeset::{
     ApprovalDigestKey, ChangeSetOutput, ChangesetCoordinator, CommitOptions, CommitOutcome,
-    DeviceTransaction, OperationLimits, RollbackOutcome, RollbackRef, StagedRecovery,
-    UnlockOutcome, mutation_policy_signature,
+    CoordinatorError, DeviceTransaction, LifecycleState, OperationLimits, OperationRecord,
+    RollbackOutcome, RollbackRef, StagedRecovery, UnlockOutcome, mutation_policy_signature,
+    require_operation_fingerprint,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -662,6 +663,142 @@ impl ChangeManager {
         request: Value,
         cancellation: &CancellationToken,
     ) -> Result<IpsPrepareResult, SdcError> {
+        let prepared = self
+            .plan_ips_write(action, family, profile_uuid, uuid, request, cancellation)
+            .await?;
+        if let Some(profile) = prepared.profile_uuid() {
+            // Existence checks only; nothing read here is bound into the plan.
+            self.client
+                .get_ips_object(IpsWriteFamily::Profile, None, profile, cancellation)
+                .await?;
+            for signature in crate::rule_signature_uuids(prepared.request()) {
+                self.client
+                    .get_ips_object(IpsWriteFamily::Signature, None, &signature, cancellation)
+                    .await?;
+            }
+        }
+        if let (IpsWriteAction::Delete, Some(target)) = (prepared.action(), prepared.uuid()) {
+            // Runs after the envelope guards, so a predefined signature is
+            // refused without a tenant-wide scan. Not repeated at apply: a
+            // reference added in between is left to SDC's own `409`.
+            crate::ensure_unreferenced(&self.client, prepared.family(), target, cancellation)
+                .await?;
+        }
+        let change_set = self
+            .create_ips_change_set(&owner, std::slice::from_ref(&prepared))
+            .await?;
+        Ok(IpsPrepareResult {
+            change_set,
+            prepared_change: prepared,
+        })
+    }
+
+    /// Plan several IPS rule and exempt-rule writes inside one profile as a
+    /// single change set: one plan digest over every write, in order, and one
+    /// approval.
+    ///
+    /// Each write is planned exactly as [`Self::prepare_ips_write`] plans it:
+    /// update and delete read the live rule, and every guard applies. The
+    /// profile is read once and each referenced signature once, however many
+    /// writes name it. Rules are leaves, so no reference scan runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the change set is empty or carries more than
+    /// [`crate::MAX_IPS_BATCH_WRITES`] writes, when any write fails to plan
+    /// (named by its index), when two writes target the same rule, when the
+    /// profile or a referenced signature cannot be read, or when
+    /// change-control state cannot be written.
+    pub async fn prepare_ips_rule_batch(
+        &self,
+        owner: String,
+        profile_uuid: String,
+        writes: Vec<IpsRuleBatchWrite>,
+        cancellation: &CancellationToken,
+    ) -> Result<IpsBatchPrepareResult, SdcError> {
+        if writes.is_empty() || writes.len() > crate::MAX_IPS_BATCH_WRITES {
+            return Err(SdcError::InvalidInput(
+                "an IPS rule batch carries 1-32 writes",
+            ));
+        }
+        // Bound the signature existence reads below before issuing any read.
+        crate::ensure_batch_signature_budget(
+            writes.iter().filter_map(|write| write.body.as_ref()),
+        )?;
+        // Existence check first, so a wrong profile fails before any rule read.
+        self.client
+            .get_ips_object(IpsWriteFamily::Profile, None, &profile_uuid, cancellation)
+            .await?;
+        let mut prepared = Vec::with_capacity(writes.len());
+        for (index, write) in writes.into_iter().enumerate() {
+            let planned = self
+                .plan_ips_write(
+                    write.action,
+                    write.family.into(),
+                    Some(profile_uuid.clone()),
+                    write.uuid,
+                    write.body.unwrap_or(Value::Null),
+                    cancellation,
+                )
+                .await
+                .map_err(|error| match error {
+                    SdcError::Cancelled => SdcError::Cancelled,
+                    error => SdcError::PreparedChange(format!("write {index}: {error}")),
+                })?;
+            prepared.push(planned);
+        }
+        crate::validate_ips_change_set(&prepared)?;
+        // Existence checks only; nothing read here is bound into the plan.
+        let signatures = prepared
+            .iter()
+            .flat_map(|write| crate::rule_signature_uuids(write.request()))
+            .collect::<std::collections::BTreeSet<_>>();
+        for signature in &signatures {
+            self.client
+                .get_ips_object(IpsWriteFamily::Signature, None, signature, cancellation)
+                .await?;
+        }
+        let change_set = self.create_ips_change_set(&owner, &prepared).await?;
+        Ok(IpsBatchPrepareResult {
+            change_set,
+            plan_digest: crate::ips_change_set_digest(&prepared)?,
+            plan: crate::ips_change_set_plan(&prepared),
+            prepared_changes: prepared,
+        })
+    }
+
+    /// Record an IPS change set under its whole-set plan digest.
+    async fn create_ips_change_set(
+        &self,
+        owner: &str,
+        writes: &[SdcPreparedIpsWrite],
+    ) -> Result<ChangeSetOutput, SdcError> {
+        let change_set = self
+            .coordinator
+            .create_change_set(
+                self.tenant.clone(),
+                writes.to_vec(),
+                owner.to_owned(),
+                crate::ips_change_set_digest(writes)?,
+                self.ips_signature.clone(),
+                None,
+            )
+            .await
+            .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
+        self.waive_if_lab_mode(change_set, owner, ChangeKind::IpsWrite)
+            .await
+    }
+
+    /// Read one IPS write's before-state and build its digest-bound envelope.
+    async fn plan_ips_write(
+        &self,
+        action: IpsWriteAction,
+        family: IpsWriteFamily,
+        profile_uuid: Option<String>,
+        uuid: Option<String>,
+        request: Value,
+        cancellation: &CancellationToken,
+    ) -> Result<SdcPreparedIpsWrite, SdcError> {
         if family.requires_profile() != profile_uuid.is_some() {
             return Err(SdcError::InvalidInput(
                 "families `rule` and `exempt_rule` require profile_uuid; `signature` and `profile` take none",
@@ -688,50 +825,13 @@ impl ChangeManager {
         if action == IpsWriteAction::Delete && !request.is_null() {
             return Err(SdcError::InvalidInput("delete takes no body"));
         }
-        let prepared = match profile_uuid {
+        match profile_uuid {
             Some(profile) if family == IpsWriteFamily::ExemptRule => {
-                SdcPreparedIpsWrite::new_exempt_rule(action, profile, uuid, request, before)?
+                SdcPreparedIpsWrite::new_exempt_rule(action, profile, uuid, request, before)
             }
-            Some(profile) => SdcPreparedIpsWrite::new_rule(action, profile, uuid, request, before)?,
-            None => SdcPreparedIpsWrite::new(action, family, uuid, request, before)?,
-        };
-        if let Some(profile) = prepared.profile_uuid() {
-            // Existence checks only; nothing read here is bound into the plan.
-            self.client
-                .get_ips_object(IpsWriteFamily::Profile, None, profile, cancellation)
-                .await?;
-            for signature in crate::rule_signature_uuids(prepared.request()) {
-                self.client
-                    .get_ips_object(IpsWriteFamily::Signature, None, &signature, cancellation)
-                    .await?;
-            }
+            Some(profile) => SdcPreparedIpsWrite::new_rule(action, profile, uuid, request, before),
+            None => SdcPreparedIpsWrite::new(action, family, uuid, request, before),
         }
-        if let (IpsWriteAction::Delete, Some(target)) = (prepared.action(), prepared.uuid()) {
-            // Runs after the envelope guards, so a predefined signature is
-            // refused without a tenant-wide scan. Not repeated at apply: a
-            // reference added in between is left to SDC's own `409`.
-            crate::ensure_unreferenced(&self.client, prepared.family(), target, cancellation)
-                .await?;
-        }
-        let change_set = self
-            .coordinator
-            .create_change_set(
-                self.tenant.clone(),
-                vec![prepared.clone()],
-                owner.clone(),
-                prepared.plan_digest().to_owned(),
-                self.ips_signature.clone(),
-                None,
-            )
-            .await
-            .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
-        let change_set = self
-            .waive_if_lab_mode(change_set, &owner, ChangeKind::IpsWrite)
-            .await?;
-        Ok(IpsPrepareResult {
-            change_set,
-            prepared_change: prepared,
-        })
     }
 
     /// Discard an IPS write that failed before anything was sent to SDC.
@@ -884,6 +984,7 @@ impl ChangeManager {
             validation,
             outcome,
             created_uuid: transaction.created_uuid(),
+            writes: transaction.write_outcomes(),
         })
     }
 
@@ -2408,6 +2509,12 @@ impl ChangeManager {
         expected_fingerprint: String,
         cancellation: &CancellationToken,
     ) -> Result<String, SdcError> {
+        if let Some(fingerprint) = self
+            .clear_failed_ips_write(&operation_id, &owner, &expected_fingerprint, cancellation)
+            .await?
+        {
+            return Ok(fingerprint);
+        }
         let transaction = SdcTransaction::new(
             self.client.clone(),
             expected_fingerprint.clone(),
@@ -2424,6 +2531,91 @@ impl ChangeManager {
             )
             .await
             .map_err(|error| SdcError::ChangeControl(error.to_string()))
+    }
+
+    /// Clear a `Failed` IPS write operation without the generic discard's
+    /// revert, keeping its failure details.
+    ///
+    /// SDC applies IPS writes directly, so there is nothing to revert: after a
+    /// partially applied batch the earlier writes stay in SDC. The generic
+    /// discard would record "candidate reverted" over the details that name
+    /// them. Returns `None` for every other operation, which takes the generic
+    /// path and its errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdcError::ChangeControl`] when the fingerprint does not match,
+    /// the operation was settled while this waited for the tenant guard, or the
+    /// state cannot be persisted.
+    async fn clear_failed_ips_write(
+        &self,
+        operation_id: &str,
+        owner: &str,
+        expected_fingerprint: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<String>, SdcError> {
+        let is_failed_ips_write = |record: &OperationRecord| {
+            record.state == LifecycleState::Failed
+                && record
+                    .actions
+                    .first()
+                    .and_then(|action| action.get("operation"))
+                    .and_then(Value::as_str)
+                    == Some("ips_write")
+        };
+        match self
+            .coordinator
+            .record(operation_id, owner, &self.tenant)
+            .await
+        {
+            Ok(record) if is_failed_ips_write(&record) => {}
+            _ => return Ok(None),
+        }
+        let _guard = self
+            .coordinator
+            .device_guard(&self.tenant, cancellation)
+            .await
+            .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
+        // The guard can win a tie with cancellation; a cancelled caller must not
+        // unblock the tenant behind its back.
+        if cancellation.is_cancelled() {
+            return Err(SdcError::ChangeControl(
+                CoordinatorError::new("device", "operation cancelled").to_string(),
+            ));
+        }
+        // Re-read under the guard, as the generic discard does: another discard
+        // may have settled the operation while this one waited.
+        let mut record = self
+            .coordinator
+            .record(operation_id, owner, &self.tenant)
+            .await
+            .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
+        if !is_failed_ips_write(&record) {
+            return Err(SdcError::ChangeControl(
+                CoordinatorError::new(
+                    "operation_id",
+                    "operation cannot be discarded in its current state",
+                )
+                .to_string(),
+            ));
+        }
+        // SDC has no candidate to read, so the expected fingerprint stands in
+        // for the actual one, as in `SdcTransaction::fingerprint`; this checks
+        // it against the operation's own.
+        require_operation_fingerprint(&record, expected_fingerprint, expected_fingerprint)
+            .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
+        let failure = record.details.take().unwrap_or_default();
+        record.details = Some(format!(
+            "cleared by {owner} without a revert; any write recorded as applied remains in \
+             SDC. {failure}"
+        ));
+        record.state = LifecycleState::Discarded;
+        record.config_lock_held = false;
+        self.coordinator
+            .update(record.clone())
+            .await
+            .map_err(|error| SdcError::ChangeControl(error.to_string()))?;
+        Ok(Some(record.current))
     }
 
     /// Return current shared change-set state.
@@ -2478,6 +2670,28 @@ impl ChangeManager {
                         ))
                     })?;
                 prepared.caller_view()
+            }
+            // An IPS change set of several writes is approved as a whole, so
+            // the approver sees every write, in the order apply sends them.
+            // `plan_digest` is the whole-set digest apply takes as
+            // `expected_plan_digest`; each write's own digest would be refused.
+            // It is recomputed from the stored writes, so a caller that lost
+            // the prepare response can still apply.
+            Some("ips_write") if record.actions.len() > 1 => {
+                let writes: Vec<SdcPreparedIpsWrite> = serde_json::from_value(Value::Array(
+                    record.actions.clone(),
+                ))
+                .map_err(|error| {
+                    SdcError::ChangeControl(format!(
+                        "failed to deserialize prepared IPS writes: {error}"
+                    ))
+                })?;
+                Ok(serde_json::json!({
+                    "operation": "ips_write_batch",
+                    "plan_digest": crate::ips_change_set_digest(&writes)?,
+                    "write_count": writes.len(),
+                    "writes": record.actions,
+                }))
             }
             // Every other kind is returned as staged. Their before-state comes
             // from endpoints with no read-path allowlist, so there is nothing
@@ -4985,7 +5199,7 @@ mod tests {
             .expect("apply");
 
         assert_eq!(applied.created_uuid.as_deref(), Some("rule-new"));
-        assert_eq!(applied.validation.family, IpsWriteFamily::Rule);
+        assert_eq!(applied.validation.family, Some(IpsWriteFamily::Rule));
         let sent = writes(&seen);
         assert_eq!(sent.len(), 1, "exactly one write: {sent:?}");
         assert_eq!(sent[0].0, "POST");
@@ -5295,7 +5509,7 @@ mod tests {
             .await
             .expect("apply");
         assert_eq!(applied.created_uuid.as_deref(), Some("x-new"));
-        assert_eq!(applied.validation.family, IpsWriteFamily::ExemptRule);
+        assert_eq!(applied.validation.family, Some(IpsWriteFamily::ExemptRule));
         let sent = writes(&seen);
         assert_eq!(sent.len(), 1, "exactly one write: {sent:?}");
         assert_eq!(sent[0].0, "POST");
@@ -5837,7 +6051,7 @@ mod tests {
         );
         transaction
             .commit(
-                &prepared,
+                &vec![prepared.clone()],
                 &Attribution::stdio(),
                 &mecmcp_changeset::CommitOptions::default(),
             )
@@ -5872,7 +6086,7 @@ mod tests {
         );
         transaction
             .commit(
-                &prepared,
+                &vec![prepared.clone()],
                 &Attribution::stdio(),
                 &mecmcp_changeset::CommitOptions::default(),
             )
@@ -5882,6 +6096,449 @@ mod tests {
             transaction.refused_before_write(),
             "a failed pre-write read must still be discardable"
         );
+        server.abort();
+    }
+
+    /// A fake SDC for rule batches: every GET answers with `rule-state`
+    /// (read through `current`), and write number `fail_at` (0-based, counting
+    /// writes only) is rejected with a 400; the others answer
+    /// `{"uuid": "new-<n>"}`.
+    async fn batch_server(
+        current: Arc<std::sync::Mutex<Value>>,
+        fail_at: Option<usize>,
+    ) -> (Url, tokio::task::JoinHandle<()>, Seen) {
+        let seen: Seen = Arc::default();
+        let log = seen.clone();
+        let count = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().fallback(
+            move |method: axum::http::Method, uri: axum::http::Uri, body: axum::body::Bytes| {
+                let current = current.clone();
+                let log = log.clone();
+                let count = count.clone();
+                async move {
+                    let parsed = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                    log.lock().expect("log").push((
+                        method.to_string(),
+                        uri.path().to_owned(),
+                        parsed,
+                    ));
+                    if method == axum::http::Method::GET {
+                        return (
+                            axum::http::StatusCode::OK,
+                            Json(current.lock().expect("current").clone()),
+                        );
+                    }
+                    let n = count.fetch_add(1, Ordering::SeqCst);
+                    if Some(n) == fail_at {
+                        (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            Json(json!({"code": "invalid", "message": "then.action is invalid"})),
+                        )
+                    } else {
+                        (
+                            axum::http::StatusCode::OK,
+                            Json(json!({"uuid": format!("new-{n}")})),
+                        )
+                    }
+                }
+            },
+        );
+        let (url, task) = serve(app).await;
+        (url, task, seen)
+    }
+
+    fn rule_state() -> Value {
+        json!({"uuid": "r-9", "name": "OLD", "ips_signature": [{"uuid": "sig-a"}]})
+    }
+
+    fn batch_writes() -> Vec<IpsRuleBatchWrite> {
+        serde_json::from_value(json!([
+            {"action": "create", "family": "rule", "body": rule_body()},
+            {"action": "create", "family": "exempt_rule",
+             "body": {"name": "EXEMPT-A", "ips_signature": [{"uuid": "sig-a"}]}},
+            {"action": "delete", "family": "rule", "uuid": "r-9"}
+        ]))
+        .expect("batch writes")
+    }
+
+    async fn prepare_and_approve_batch(
+        manager: &ChangeManager,
+    ) -> (IpsBatchPrepareResult, CancellationToken) {
+        let cancellation = CancellationToken::new();
+        let prepared = manager
+            .prepare_ips_rule_batch(
+                "alice".to_owned(),
+                "p-1".to_owned(),
+                batch_writes(),
+                &cancellation,
+            )
+            .await
+            .expect("prepare batch");
+        manager
+            .approve(
+                prepared.change_set.change_set_id.clone(),
+                "bob".to_owned(),
+                prepared.change_set.digest.clone(),
+                mecmcp_audit::ActorType::Human,
+            )
+            .await
+            .expect("one independent approval covers the batch");
+        (prepared, cancellation)
+    }
+
+    #[tokio::test]
+    async fn an_ips_rule_batch_is_approved_once_and_sent_in_order() {
+        let (base_url, server, seen) =
+            batch_server(Arc::new(std::sync::Mutex::new(rule_state())), None).await;
+        let (manager, _) = ips_manager(&base_url);
+        let (prepared, cancellation) = prepare_and_approve_batch(&manager).await;
+
+        assert_eq!(prepared.prepared_changes.len(), 3);
+        assert_eq!(prepared.plan["write_count"], json!(3));
+        let mut expected_reads = vec![
+            "/api/v1/ips_profiles/p-1".to_owned(),
+            "/api/v1/ips_profiles/p-1/ips_rules/r-9".to_owned(),
+        ];
+        // `sig-b` comes from `rule_body`; each signature is read once.
+        expected_reads.extend(
+            ["sig-a", "sig-b"].map(|signature| format!("/api/v1/ips_signatures/{signature}")),
+        );
+        assert_eq!(reads(&seen), expected_reads);
+        assert!(writes(&seen).is_empty(), "prepare must not write");
+
+        let details = manager
+            .prepared_change(prepared.change_set.change_set_id.clone())
+            .await
+            .expect("details");
+        assert_eq!(details["operation"], json!("ips_write_batch"));
+        assert_eq!(details["writes"].as_array().map(Vec::len), Some(3));
+        assert_eq!(
+            details["plan_digest"],
+            json!(prepared.plan_digest),
+            "a caller that lost the prepare response can recover the apply digest"
+        );
+
+        let applied = manager
+            .apply_ips_write(
+                prepared.change_set.change_set_id,
+                "alice".to_owned(),
+                prepared.change_set.digest,
+                prepared.plan_digest,
+                &Attribution::stdio(),
+                &cancellation,
+            )
+            .await
+            .expect("apply batch");
+        assert!(matches!(
+            applied.outcome,
+            CommitOutcome::Reconciled {
+                succeeded: true,
+                ..
+            }
+        ));
+        assert_eq!(applied.validation.write_count, 3);
+        assert_eq!(applied.validation.family, None);
+        assert_eq!(
+            applied.created_uuid, None,
+            "a batch reports UUIDs per write"
+        );
+        let statuses = applied
+            .writes
+            .iter()
+            .map(|write| (write.status, write.created_uuid.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            statuses,
+            vec![
+                (crate::IpsWriteStatus::Applied, Some("new-0".to_owned())),
+                (crate::IpsWriteStatus::Applied, Some("new-1".to_owned())),
+                (crate::IpsWriteStatus::Applied, None),
+            ]
+        );
+        let sent = writes(&seen)
+            .into_iter()
+            .map(|(method, path, _)| format!("{method} {path}"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sent,
+            vec![
+                "POST /api/v1/ips_profiles/p-1/ips_rules",
+                "POST /api/v1/ips_profiles/p-1/exempt_rules",
+                "DELETE /api/v1/ips_profiles/p-1/ips_rules/r-9",
+            ]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_known_partial_batch_is_a_failure_the_operator_can_clear() {
+        let (base_url, server, seen) =
+            batch_server(Arc::new(std::sync::Mutex::new(rule_state())), Some(1)).await;
+        let (manager, _) = ips_manager(&base_url);
+        let (prepared, cancellation) = prepare_and_approve_batch(&manager).await;
+        let plan_digest = prepared.plan_digest.clone();
+
+        let applied = manager
+            .apply_ips_write(
+                prepared.change_set.change_set_id,
+                "alice".to_owned(),
+                prepared.change_set.digest,
+                prepared.plan_digest,
+                &Attribution::stdio(),
+                &cancellation,
+            )
+            .await
+            .expect("a partial apply is reported, not hidden behind an error");
+        // Every write's fate is known, so this is a failure, not an unknown
+        // outcome: `Indeterminate` could not be cleared by any tool here.
+        let CommitOutcome::Reconciled {
+            succeeded: false,
+            details: Some(reason),
+            ..
+        } = &applied.outcome
+        else {
+            panic!("expected a reconciled failure, got {:?}", applied.outcome);
+        };
+        assert!(reason.contains("partially applied"), "{reason}");
+        assert!(reason.contains("ips_create as new-0"), "{reason}");
+        assert!(reason.contains("discard_sdc_operation"), "{reason}");
+
+        // The failed operation blocks the next apply until it is cleared...
+        let (next, _) = prepare_and_approve_batch(&manager).await;
+        let attribution = Attribution::stdio();
+        let apply_next = || {
+            manager.apply_ips_write(
+                next.change_set.change_set_id.clone(),
+                "alice".to_owned(),
+                next.change_set.digest.clone(),
+                next.plan_digest.clone(),
+                &attribution,
+                &cancellation,
+            )
+        };
+        apply_next()
+            .await
+            .expect_err("an unreconciled operation blocks the tenant");
+        // A cancelled discard changes nothing, even when the tenant guard wins
+        // its race with cancellation (`select!` picks either at random).
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        for _ in 0..32 {
+            manager
+                .discard(
+                    applied.operation_id.clone(),
+                    "alice".to_owned(),
+                    plan_digest.clone(),
+                    &cancelled,
+                )
+                .await
+                .expect_err("a cancelled discard leaves the operation blocking");
+        }
+        // ...and the owner can clear it with the existing discard path.
+        manager
+            .discard(
+                applied.operation_id.clone(),
+                "alice".to_owned(),
+                plan_digest,
+                &cancellation,
+            )
+            .await
+            .expect("a known partial failure is discardable");
+        // The cleared record keeps the failure and does not claim a revert.
+        let record = manager
+            .coordinator
+            .record(&applied.operation_id, "alice", &manager.tenant)
+            .await
+            .expect("the cleared operation stays on record");
+        assert_eq!(record.state, LifecycleState::Discarded);
+        let details = record.details.unwrap_or_default();
+        assert!(details.contains("partially applied"), "{details}");
+        assert!(details.contains("remains in SDC"), "{details}");
+        assert!(!details.contains("candidate reverted"), "{details}");
+        apply_next()
+            .await
+            .expect("the tenant is unblocked after the discard");
+        assert_eq!(
+            applied
+                .writes
+                .iter()
+                .map(|write| write.status)
+                .collect::<Vec<_>>(),
+            vec![
+                crate::IpsWriteStatus::Applied,
+                crate::IpsWriteStatus::Rejected,
+                crate::IpsWriteStatus::NotAttempted,
+            ]
+        );
+        // Two from the partial batch (it stops at the failure), three from the
+        // batch applied after the discard.
+        assert_eq!(writes(&seen).len(), 5);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_write_the_client_would_refuse_stops_the_batch_before_any_write() {
+        let (base_url, server, seen) =
+            batch_server(Arc::new(std::sync::Mutex::new(rule_state())), None).await;
+        let (manager, _) = ips_manager(&base_url);
+        let cancellation = CancellationToken::new();
+        let mut writes_in = batch_writes();
+        // Passes the envelope guards, but the client refuses to send a body
+        // carrying a redaction marker.
+        writes_in[1].body = Some(json!({
+            "name": "EXEMPT-A",
+            "description": "copied from a [REDACTED] read",
+            "ips_signature": [{"uuid": "sig-a"}]
+        }));
+        let prepared = manager
+            .prepare_ips_rule_batch(
+                "alice".to_owned(),
+                "p-1".to_owned(),
+                writes_in,
+                &cancellation,
+            )
+            .await
+            .expect("prepare accepts it");
+        manager
+            .approve(
+                prepared.change_set.change_set_id.clone(),
+                "bob".to_owned(),
+                prepared.change_set.digest.clone(),
+                mecmcp_audit::ActorType::Human,
+            )
+            .await
+            .expect("approve");
+        let error = manager
+            .apply_ips_write(
+                prepared.change_set.change_set_id,
+                "alice".to_owned(),
+                prepared.change_set.digest,
+                prepared.plan_digest,
+                &Attribution::stdio(),
+                &cancellation,
+            )
+            .await
+            .expect_err("the local refusal must surface before anything is sent");
+        assert!(error.to_string().contains("discarded"), "{error}");
+        assert!(
+            writes(&seen).is_empty(),
+            "write 0 must not land ahead of a write that can never be sent"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_batch_over_the_signature_budget_is_refused_before_any_read() {
+        let (base_url, server, seen) =
+            batch_server(Arc::new(std::sync::Mutex::new(rule_state())), None).await;
+        let (manager, _) = ips_manager(&base_url);
+        // Two rules of 200 distinct signatures each: each within a rule's own
+        // limit, 400 together.
+        let rule = |offset: usize| {
+            json!({
+                "action": "create",
+                "family": "rule",
+                "body": {
+                    "name": format!("R{offset}"),
+                    "ips_signature": (offset..offset + 200)
+                        .map(|n| json!({"uuid": format!("sig-{n}")}))
+                        .collect::<Vec<_>>(),
+                    "then": {"action": "no-action"}
+                }
+            })
+        };
+        let writes_in: Vec<IpsRuleBatchWrite> =
+            serde_json::from_value(json!([rule(0), rule(200)])).expect("writes");
+        let error = manager
+            .prepare_ips_rule_batch(
+                "alice".to_owned(),
+                "p-1".to_owned(),
+                writes_in,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("400 distinct signatures exceed the batch budget");
+        assert!(error.to_string().contains("400"), "{error}");
+        assert!(
+            reads(&seen).is_empty(),
+            "the budget is checked before any read"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_batch_whose_first_write_is_rejected_stays_discardable() {
+        let (base_url, server, seen) =
+            batch_server(Arc::new(std::sync::Mutex::new(rule_state())), Some(0)).await;
+        let (manager, _) = ips_manager(&base_url);
+        let (prepared, cancellation) = prepare_and_approve_batch(&manager).await;
+
+        let error = manager
+            .apply_ips_write(
+                prepared.change_set.change_set_id,
+                "alice".to_owned(),
+                prepared.change_set.digest,
+                prepared.plan_digest,
+                &Attribution::stdio(),
+                &cancellation,
+            )
+            .await
+            .expect_err("nothing landed, so this is a clean refusal");
+        assert!(error.to_string().contains("discarded"), "{error}");
+        assert_eq!(writes(&seen).len(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn drift_on_any_batch_target_refuses_before_the_first_write() {
+        let current = Arc::new(std::sync::Mutex::new(rule_state()));
+        let (base_url, server, seen) = batch_server(current.clone(), None).await;
+        let (manager, _) = ips_manager(&base_url);
+        let (prepared, cancellation) = prepare_and_approve_batch(&manager).await;
+        // The rule the third write deletes changed after approval.
+        current.lock().expect("current")["name"] = json!("EDITED-IN-PORTAL");
+
+        let error = manager
+            .apply_ips_write(
+                prepared.change_set.change_set_id,
+                "alice".to_owned(),
+                prepared.change_set.digest,
+                prepared.plan_digest,
+                &Attribution::stdio(),
+                &cancellation,
+            )
+            .await
+            .expect_err("drift must refuse the whole batch");
+        assert!(error.to_string().contains("discarded"), "{error}");
+        assert!(
+            writes(&seen).is_empty(),
+            "no write may be sent when any target drifted"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_batch_names_the_write_that_fails_to_plan() {
+        let (base_url, server, seen) =
+            batch_server(Arc::new(std::sync::Mutex::new(rule_state())), None).await;
+        let (manager, _) = ips_manager(&base_url);
+        let mut writes_in = batch_writes();
+        writes_in[1].body = Some(json!({
+            "name": "EXEMPT-A",
+            "ips_signature": [{"uuid": "sig-a"}],
+            "then": {"action": "no-action"}
+        }));
+        let error = manager
+            .prepare_ips_rule_batch(
+                "alice".to_owned(),
+                "p-1".to_owned(),
+                writes_in,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("an exempt rule with `then` is refused");
+        assert!(error.to_string().contains("write 1:"), "{error}");
+        assert!(writes(&seen).is_empty());
         server.abort();
     }
 }

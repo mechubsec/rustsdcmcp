@@ -1429,10 +1429,36 @@ impl SdcClient {
         body: &Value,
         cancellation: &CancellationToken,
     ) -> Result<Value, SdcError> {
-        validate_object_body(body)?;
+        Self::check_ips_write(family, profile_uuid, None, Some(body))?;
         let segments = Self::ips_collection(family, profile_uuid)?;
         self.send_write(Method::POST, &segments, Some(body), cancellation)
             .await
+    }
+
+    /// Every check [`Self::create_ips_object`], [`Self::update_ips_object`]
+    /// and [`Self::delete_ips_object`] make locally before sending, with no
+    /// request issued.
+    ///
+    /// A multi-write IPS commit runs this over every write before the first
+    /// request, so a write the client would refuse cannot fail after an
+    /// earlier write has landed and be mistaken for one that was sent.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same error the write method would return locally.
+    pub(crate) fn check_ips_write(
+        family: crate::IpsWriteFamily,
+        profile_uuid: Option<&str>,
+        uuid: Option<&str>,
+        body: Option<&Value>,
+    ) -> Result<(), SdcError> {
+        if let Some(uuid) = uuid {
+            validate_atom("uuid", uuid)?;
+        }
+        if let Some(body) = body {
+            validate_object_body(body)?;
+        }
+        Self::ips_collection(family, profile_uuid).map(|_| ())
     }
 
     /// Replace one custom IPS signature, IPS profile, or (with
@@ -1450,8 +1476,7 @@ impl SdcClient {
         body: &Value,
         cancellation: &CancellationToken,
     ) -> Result<Value, SdcError> {
-        validate_atom("uuid", uuid)?;
-        validate_object_body(body)?;
+        Self::check_ips_write(family, profile_uuid, Some(uuid), Some(body))?;
         let mut segments = Self::ips_collection(family, profile_uuid)?;
         segments.push(uuid);
         self.send_write(Method::PUT, &segments, Some(body), cancellation)
@@ -1472,7 +1497,7 @@ impl SdcClient {
         uuid: &str,
         cancellation: &CancellationToken,
     ) -> Result<Value, SdcError> {
-        validate_atom("uuid", uuid)?;
+        Self::check_ips_write(family, profile_uuid, Some(uuid), None)?;
         let mut segments = Self::ips_collection(family, profile_uuid)?;
         segments.push(uuid);
         self.send_write(Method::DELETE, &segments, None, cancellation)

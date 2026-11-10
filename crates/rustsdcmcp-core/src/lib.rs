@@ -39,9 +39,12 @@ pub use firewall_write::{
     SdcFirewallTransaction, SdcPreparedFirewallWrite,
 };
 pub use ips_write::{
-    IpsApplyResult, IpsPrepareResult, IpsValidationReport, IpsWriteAction, IpsWriteFamily,
-    SdcIpsTransaction, SdcPreparedIpsWrite, ensure_unreferenced, find_profile_references,
-    find_signature_references, rule_signature_uuids,
+    IpsApplyResult, IpsBatchPrepareResult, IpsPrepareResult, IpsRuleBatchWrite, IpsRuleFamily,
+    IpsValidationReport, IpsWriteAction, IpsWriteFamily, IpsWriteOutcome, IpsWriteStatus,
+    MAX_IPS_BATCH_SIGNATURES, MAX_IPS_BATCH_WRITES, SdcIpsTransaction, SdcPreparedIpsWrite,
+    ensure_batch_signature_budget, ensure_unreferenced, find_profile_references,
+    find_signature_references, ips_change_set_digest, ips_change_set_plan, rule_signature_uuids,
+    validate_ips_change_set,
 };
 pub use license_write::{
     LicenseApplyResult, LicensePrepareResult, LicenseValidationReport, LicenseWriteOperation,

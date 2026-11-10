@@ -17,8 +17,10 @@ fn tool_registry_has_expected_unique_surface() {
     // CLAUDE.md's IAM decision narrowly (see the decision log entry there);
     // it is a `SCOPED_READ_TOOLS` entry, excluded from wildcard tool grants
     // like a write tool, but not itself a write. #266 added the IPS
-    // signature/profile prepare/apply pair, so 60 reads / 20 writes.
-    assert_eq!(KNOWN_TOOLS.len(), 80);
+    // signature/profile prepare/apply pair, so 60 reads / 20 writes. The IPS
+    // rule batch added prepare_sdc_ips_rule_batch (applied through
+    // apply_sdc_ips_write), so 60 reads / 21 writes.
+    assert_eq!(KNOWN_TOOLS.len(), 81);
     assert_eq!(
         KNOWN_TOOLS.iter().copied().collect::<BTreeSet<_>>().len(),
         KNOWN_TOOLS.len()
@@ -41,6 +43,7 @@ fn tool_registry_has_expected_unique_surface() {
             "prepare_sdc_firewall_layout_write",
             "prepare_sdc_firewall_rule_write",
             "prepare_sdc_firewall_write",
+            "prepare_sdc_ips_rule_batch",
             "prepare_sdc_ips_write",
             "prepare_sdc_license_write",
             "prepare_sdc_nat_write",
@@ -225,6 +228,7 @@ fn redacted_tools_call_finish_redacted() {
         "prepare_sdc_device_inventory_sync",
         "prepare_sdc_object_write",
         "prepare_sdc_ips_write",
+        "prepare_sdc_ips_rule_batch",
         "prepare_sdc_nat_write",
         "approve_sdc_change_set",
         "apply_sdc_change_set",
