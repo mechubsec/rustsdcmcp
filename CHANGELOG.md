@@ -9,7 +9,15 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
-## Unreleased
+## `v0.7.0` — 2026-11-09
+
+### Security
+
+- Bumps `rmcp` to 3.9.0 for RUSTSEC-2026-0462. The advisory is in rmcp's
+  Streamable HTTP client, which this server does not use. (#307)
+- The image's `distroless/cc-debian13` runtime base moves to `cc66d22`, which
+  carries zlib `1.3.1-1+deb13u1` for CVE-2026-76844 and CVE-2026-85091. The
+  `v0.6.0` image's zlib is affected. (#302, #308)
 
 ### Added
 
@@ -49,6 +57,15 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 ### Fixed
 
 - `SdcConfig`'s `Debug` output showed the `egress_proxy` URL in full, including any credentials in it. It now shows only the proxy's origin (scheme, host, port). No shipped code path printed the config, so nothing leaked.
+
+### Dependencies
+
+- `rmcp` 3.7.0 -> 3.8.0, `rustix` 1.1.5 -> 1.1.6 (#304); `axum-server`
+  0.8.0 -> 0.9.0 (#311); `uuid` 1.29.0 -> 1.29.2, `toml` 1.1.8 -> 1.2.1 (#312)
+- `rust` builder image updated (#301)
+- Release workflows: mecmcp reusable workflows v0.28.2 -> v0.32.0,
+  `docker/login-action` 4.7.0 -> 4.8.0; the package-conformance action
+  v0.30.1 -> v0.32.0 (#303, #309)
 
 ## `v0.6.0` — 2026-10-29
 
