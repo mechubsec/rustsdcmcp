@@ -40,7 +40,7 @@ RUN touch crates/rustsdcmcp/src/main.rs crates/rustsdcmcp-core/src/lib.rs && \
 
 # Runtime stage: Distroless Debian 13 with nonroot user
 # Pinned to the amd64 digest resolved on 2026-08-24.
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:08476c244888bfb425bae1ae4dd7c17f093e972aab8426883d97f3c6f280f7c1
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cc66d222f0a7ec996b78a99fe76a969bc80b539a5016ad866c14d1949bc6d0ab
 
 # Run as nonroot user (UID 65532)
 USER 65532:65532
