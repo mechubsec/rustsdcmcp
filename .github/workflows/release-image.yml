@@ -19,7 +19,7 @@ jobs:
     # mecmcp v0.28.2 (v0.28.1 plus an upload-artifact bump). The pin is the
     # released tag, and the caller opts into the Docker Hub inputs that file
     # already declares.
-    uses: mechubsec/mecmcp/.github/workflows/reusable-release-image.yml@ab6786faca282cfbfffed5668f6a15929ce26bef # v0.33.1
+    uses: mechubsec/mecmcp/.github/workflows/reusable-release-image.yml@78f0b978cf67ca10547cce4c15111eb7a872d886 # v0.33.2
     with:
       # GHCR requires a lowercase image path; github.repository is already lowercase.
       image: ghcr.io/${{ github.repository }}
