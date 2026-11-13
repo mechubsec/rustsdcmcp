@@ -19,16 +19,13 @@ jobs:
     # mecmcp v0.28.2 (v0.28.1 plus an upload-artifact bump). The pin is the
     # released tag, and the caller opts into the Docker Hub inputs that file
     # already declares.
-    uses: mechubsec/mecmcp/.github/workflows/reusable-release-image.yml@39e7308cda922dadad18a0b0a5775ec1ab4a0bca # v0.32.0
+    uses: mechubsec/mecmcp/.github/workflows/reusable-release-image.yml@ab6786faca282cfbfffed5668f6a15929ce26bef # v0.33.1
     with:
       # GHCR requires a lowercase image path; github.repository is already lowercase.
       image: ghcr.io/${{ github.repository }}
       # Dual-push (mecmcp MEC-2110). Docker Hub org is `mechub`.
-      # Docker Hub images are linux/amd64 only, so set platforms explicitly
-      # (this is also the workflow default).
       dockerhub-image: docker.io/mechub/rustsdcmcp
       description: 'Security Director Cloud MCP server'
-      platforms: linux/amd64
     secrets:
       dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
       dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -54,9 +51,13 @@ jobs:
           version: v0.70.0
 
       - name: Scan pushed image
+        # The digest is a multi-arch manifest list, so scan each platform.
+        # --image-src remote: a local daemon copy would silently win over --platform.
         run: |
-          trivy image --scanners vuln --exit-code 1 --ignore-unfixed \
-            "ghcr.io/${{ github.repository }}@${{ needs.release.outputs.digest }}"
+          for platform in linux/amd64 linux/arm64; do
+            trivy image --image-src remote --platform "${platform}" --scanners vuln --exit-code 1 --ignore-unfixed \
+              "ghcr.io/${{ github.repository }}@${{ needs.release.outputs.digest }}"
+          done
 
   tag-version:
     name: Resolve tag version

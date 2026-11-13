@@ -9,7 +9,7 @@
 # against a newer glibc that the Debian 13 runtime does not carry.
 
 # Builder stage: Debian 13 slim with Rust 1.99
-# Pinned to the amd64 digest resolved on 2026-08-25.
+# Pinned to the multi-arch image index digest resolved on 2026-08-25.
 FROM rust:1.99-slim-trixie@sha256:b8e062b1c3a80183df83d9ba187cadd2b5ab84bc78d453dbfeb2fccd5f982247 AS builder
 
 WORKDIR /build
@@ -39,7 +39,7 @@ RUN touch crates/rustsdcmcp/src/main.rs crates/rustsdcmcp-core/src/lib.rs && \
     cargo build --release --locked
 
 # Runtime stage: Distroless Debian 13 with nonroot user
-# Pinned to the amd64 digest resolved on 2026-08-24.
+# Pinned to the multi-arch image index digest resolved on 2026-08-24.
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cc66d222f0a7ec996b78a99fe76a969bc80b539a5016ad866c14d1949bc6d0ab
 
 # Run as nonroot user (UID 65532)

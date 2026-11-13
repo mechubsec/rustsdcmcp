@@ -9,6 +9,15 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
+## Unreleased
+
+### Changed
+
+- Container images are published for `linux/amd64` and `linux/arm64`, so Apple
+  Silicon pulls a native image instead of failing with `no matching manifest`
+  (mechubsec/rustjunosmcp#648). Each platform builds on its own native runner. The post-release
+  Trivy scan now covers both platforms.
+
 ## `v0.7.0` — 2026-11-09
 
 ### Security
