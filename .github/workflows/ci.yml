@@ -247,7 +247,7 @@ jobs:
       - name: Conformance
         # mecmcp v0.30.1. It needs mecmcp#492, which teaches the manifest
         # reader the audit_hmac_flag key this repo's conformance.toml sets.
-        uses: mechubsec/mecmcp/packaging/conformance@39e7308cda922dadad18a0b0a5775ec1ab4a0bca
+        uses: mechubsec/mecmcp/packaging/conformance@ab6786faca282cfbfffed5668f6a15929ce26bef
         with:
           staging: staging
           manifest: staging/conformance.toml
