@@ -10,7 +10,7 @@
 
 # Builder stage: Debian 13 slim with Rust 1.99
 # Pinned to the multi-arch image index digest resolved on 2026-08-25.
-FROM rust:1.99-slim-trixie@sha256:b8e062b1c3a80183df83d9ba187cadd2b5ab84bc78d453dbfeb2fccd5f982247 AS builder
+FROM rust:1.100-slim-trixie@sha256:e9d95b74296f7126a83ae3d041aeaba1ff4c478f13abc5cc034fcf7c131c3d4a AS builder
 
 WORKDIR /build
 
