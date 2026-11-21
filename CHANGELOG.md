@@ -13,6 +13,9 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 
 ### Changed
 
+- The image runs on `distroless/base-nossl-debian13` instead of `cc-debian13`, so
+  libssl3t64 (CVE-2026-124709, unfixed) is gone rather than suppressed. The
+  binary is rustls-only; `libgcc_s.so.1` is staged in from the cc image.
 - Container images are published for `linux/amd64` and `linux/arm64`, so Apple
   Silicon pulls a native image instead of failing with `no matching manifest`
   (mechubsec/rustjunosmcp#648). Each platform builds on its own native runner. The post-release

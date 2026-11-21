@@ -2,11 +2,15 @@
 #
 # Multi-stage build producing a distroless image with no shell and no external
 # binaries. The runtime has no package manager, no shell, and no GNU userland —
-# only libc and the statically-linked server binary.
+# only glibc, libgcc_s and the server binary.
 #
 # Builder glibc generation must be ≤ runtime generation: Debian 13 (trixie) on
 # both sides satisfies this. Building on a newer base (Debian 14+) would link
 # against a newer glibc that the Debian 13 runtime does not carry.
+
+# Source of libgcc-s1 only; the runtime is base-nossl, which lacks it. Keep it
+# ahead of the builder so the runtime stays the last FROM.
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2 AS libgcc
 
 # Builder stage: Debian 13 slim with Rust 1.100
 # Pinned to the multi-arch image index digest resolved on 2026-08-25.
@@ -38,9 +42,22 @@ COPY crates/ crates/
 RUN touch crates/rustsdcmcp/src/main.rs crates/rustsdcmcp-core/src/lib.rs && \
     cargo build --release --locked
 
-# Runtime stage: Distroless Debian 13 with nonroot user
+# libgcc_s.so.1 is the one library the binary needs beyond glibc, and
+# base-nossl does not ship it. Stage it with its dpkg records (status.d) so
+# Trivy and the SBOM still see libgcc-s1 and gcc-14-base. The multiarch
+# directory comes from the builder's own triplet (x86_64 or aarch64).
+COPY --from=libgcc / /cc/
+RUN triplet="$(gcc -dumpmachine | sed 's/-pc-/-/')" && \
+    install -d "/stage-libgcc/usr/lib/${triplet}" /stage-libgcc/var/lib/dpkg/status.d && \
+    cp -a "/cc/usr/lib/${triplet}/libgcc_s.so.1" "/stage-libgcc/usr/lib/${triplet}/" && \
+    cp -a /cc/var/lib/dpkg/status.d/libgcc-s1 /cc/var/lib/dpkg/status.d/libgcc-s1.md5sums \
+        /cc/var/lib/dpkg/status.d/gcc-14-base /cc/var/lib/dpkg/status.d/gcc-14-base.md5sums \
+        /stage-libgcc/var/lib/dpkg/status.d/
+
+# Runtime stage: distroless base-nossl (no libssl3t64/libcrypto: the binary is
+# rustls-only, and libssl3t64 carries unfixed CVE-2026-124709)
 # Pinned to the multi-arch image index digest resolved on 2026-08-24.
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2
+FROM gcr.io/distroless/base-nossl-debian13:nonroot@sha256:89815d620ac01d8de13cdaf04d19ed874447ca2296d4985b14b818f6e5e47854
 
 # Run as nonroot user (UID 65532)
 USER 65532:65532
@@ -49,6 +66,8 @@ USER 65532:65532
 # for a healthcheck command to run. Orchestrators supervise the process via the
 # container runtime. Suppressed explicitly in .trivyignore.yaml (AVD-DS-0026)
 # rather than silently, so the decision is reviewable.
+
+COPY --from=builder /stage-libgcc/ /
 
 # Copy the server binary
 COPY --from=builder /build/target/release/rustsdcmcp /usr/local/bin/rustsdcmcp
