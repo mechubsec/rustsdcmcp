@@ -101,6 +101,17 @@ jobs:
           # needs sudo to stat back into it.
           sudo test -s "$state_dir/audit-hmac.key" || { echo "FAIL: audit-hmac.key was not generated"; exit 1; }
           echo "PASS: audit-hmac.key generated on first run"
+      - name: Verify the image has no OpenSSL and keeps libgcc_s
+        run: |
+          # Regression guard: the runtime is distroless base-nossl, so libssl3t64
+          # (CVE-2026-124709) must stay out. libgcc_s.so.1 is staged in by the
+          # Dockerfile; the audit-hmac step above proves the binary starts with it.
+          container_id=$(docker create rustsdcmcp:ci)
+          files=$(docker export "$container_id" | tar -t)
+          docker rm "$container_id" > /dev/null
+          if echo "$files" | grep -E 'libssl|libcrypto'; then echo "FAIL: OpenSSL present in image"; exit 1; fi
+          echo "$files" | grep -q 'libgcc_s\.so\.1$' || { echo "FAIL: libgcc_s.so.1 missing from image"; exit 1; }
+          echo "PASS: no libssl/libcrypto, libgcc_s present"
 
   packaging:
     name: Package
