@@ -1,0 +1,5 @@
+[advisories]
+ignore = [
+    # chrono is unmaintained (no fix exists); required by rmcp, oauth2 and mecmcp.
+    "RUSTSEC-2026-0543",
+]
