@@ -14,7 +14,7 @@ FROM gcr.io/distroless/cc-debian13:nonroot@sha256:532c7a94f9e96ba9db75eb9388f422
 
 # Builder stage: Debian 13 slim with Rust 1.100
 # Pinned to the multi-arch image index digest resolved on 2026-11-22.
-FROM rust:1.100-slim-trixie@sha256:e9d95b74296f7126a83ae3d041aeaba1ff4c478f13abc5cc034fcf7c131c3d4a AS builder
+FROM rust:1.100-slim-trixie@sha256:6f14b2b4b278ec0d50aa1d69541c304ce0f95e0f6268487aa9924af1c2e9aebe AS builder
 
 WORKDIR /build
 
