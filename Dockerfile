@@ -10,10 +10,10 @@
 
 # Source of libgcc-s1 only; the runtime is base-nossl, which lacks it. Keep it
 # ahead of the builder so the runtime stays the last FROM.
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2 AS libgcc
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:532c7a94f9e96ba9db75eb9388f4227751131c7cb0a411d1a8521af4096135de AS libgcc
 
 # Builder stage: Debian 13 slim with Rust 1.100
-# Pinned to the multi-arch image index digest resolved on 2026-08-25.
+# Pinned to the multi-arch image index digest resolved on 2026-11-22.
 FROM rust:1.100-slim-trixie@sha256:e9d95b74296f7126a83ae3d041aeaba1ff4c478f13abc5cc034fcf7c131c3d4a AS builder
 
 WORKDIR /build
@@ -56,8 +56,8 @@ RUN triplet="$(gcc -dumpmachine | sed 's/-pc-/-/')" && \
 
 # Runtime stage: distroless base-nossl (no libssl3t64/libcrypto: the binary is
 # rustls-only, and libssl3t64 carries unfixed CVE-2026-124709)
-# Pinned to the multi-arch image index digest resolved on 2026-08-24.
-FROM gcr.io/distroless/base-nossl-debian13:nonroot@sha256:89815d620ac01d8de13cdaf04d19ed874447ca2296d4985b14b818f6e5e47854
+# Pinned to the multi-arch image index digest resolved on 2026-11-22.
+FROM gcr.io/distroless/base-nossl-debian13:nonroot@sha256:4006ac92504be607b70de01d1f64f38288c69fcd8faa820f6d3aed266ea32ac5
 
 # Run as nonroot user (UID 65532)
 USER 65532:65532
