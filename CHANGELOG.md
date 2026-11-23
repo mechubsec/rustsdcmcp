@@ -30,6 +30,8 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 
 ### Security
 
+- `url` 2.5.8 to 2.5.9 (and `form_urlencoded` 1.2.2 to 1.2.3) for RUSTSEC-2026-0592,
+  a stack overflow in `Url::origin()` on nested `blob:` URLs.
 - `RUSTSEC-2026-0543` (chrono unmaintained) is ignored in `deny.toml` and
   `.cargo/audit.toml`: rmcp, oauth2 and mecmcp require chrono and no fix exists.
   Revisit when rmcp drops it. (#322)
