@@ -9,6 +9,19 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
+## `v0.7.2` — 2026-11-22
+
+### Security
+
+- Both distroless pins (`base-nossl-debian13` runtime, `cc-debian13` source of
+  `libgcc_s.so.1`) move to digests carrying glibc `2.41-12+deb13u5`. The
+  `v0.7.1` image ships libc6 `2.41-12+deb13u4`, which has 14 fixable CVEs:
+  CVE-2026-18374, CVE-2026-19499, CVE-2026-19542, CVE-2026-5435,
+  CVE-2026-6238, CVE-2026-6368, CVE-2026-6791, CVE-2026-77117,
+  CVE-2026-80489, CVE-2026-8674, CVE-2026-86805, CVE-2026-89092,
+  CVE-2026-95818 and CVE-2026-97399. The `v0.7.1` image is affected, and its
+  post-release scan failed on them. `v0.7.1` got no GitHub release; use `v0.7.2`.
+
 ## `v0.7.1` — 2026-11-22
 
 ### Changed
@@ -27,6 +40,13 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
   source of `libgcc_s.so.1`); the `mechubsec/mecmcp` reusable workflows and
   conformance action from 0.32.0 to 0.33.1, and `release-image` pinned at
   `v0.33.2` (#317).
+
+### Fixed
+
+- The LXC packaging guide extracts the binary with `--platform linux/amd64`, and
+  `scripts/build-package.sh` refuses a binary that is not an x86-64 ELF. With a
+  multi-arch image, the unqualified extraction on an arm64 host produced an
+  `amd64` package holding an arm64 binary.
 
 ### Security
 
