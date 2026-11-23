@@ -155,7 +155,7 @@ if [[ ${SDCMCP_PACKAGE_SKIP_BUILD:-0} == 1 ]]; then
         printf '%s\n' \
             'SDCMCP_PACKAGE_SKIP_BUILD=1 but target/release/rustsdcmcp is missing or not executable.' \
             'Place the binary there first, e.g. from the release image:' \
-            '  docker create --name sx ghcr.io/mechubsec/rustsdcmcp:<version>' \
+            '  docker create --platform linux/amd64 --name sx ghcr.io/mechubsec/rustsdcmcp:<version>' \
             '  docker cp sx:/usr/local/bin/rustsdcmcp target/release/rustsdcmcp' \
             '  docker rm sx' >&2
         exit 1
@@ -164,6 +164,16 @@ if [[ ${SDCMCP_PACKAGE_SKIP_BUILD:-0} == 1 ]]; then
 else
     cargo build --release -p rustsdcmcp --locked
 fi
+
+# The package is labelled amd64 and BUILD-INFO says x86_64, and install.sh
+# trusts both: refuse anything that is not an x86-64 ELF (e_machine 0x3e).
+[[ $(od -An -tx1 -N4 target/release/rustsdcmcp | tr -d ' \n') == 7f454c46 &&
+    $(od -An -tx1 -j18 -N2 target/release/rustsdcmcp | tr -d ' \n') == 3e00 ]] || {
+    printf '%s\n' \
+        'target/release/rustsdcmcp is not an x86-64 ELF binary, but this package is amd64.' \
+        'Extract it from the image with docker create --platform linux/amd64.' >&2
+    exit 1
+}
 
 build_dir=$(mktemp -d)
 trap cleanup EXIT

@@ -50,9 +50,10 @@ extracted rather than letting it compile one:
 cd /path/to/rustsdcmcp
 mkdir -p target/release
 
-# Pull and extract the binary from the release image
-docker pull ghcr.io/mechubsec/rustsdcmcp:0.7.1
-docker create --name sx ghcr.io/mechubsec/rustsdcmcp:0.7.1
+# Pull and extract the binary from the release image. The image is multi-arch
+# and the package is amd64, so name the platform or an arm64 host gets arm64.
+docker pull --platform linux/amd64 ghcr.io/mechubsec/rustsdcmcp:0.7.1
+docker create --platform linux/amd64 --name sx ghcr.io/mechubsec/rustsdcmcp:0.7.1
 docker cp sx:/usr/local/bin/rustsdcmcp target/release/rustsdcmcp
 docker rm sx
 
