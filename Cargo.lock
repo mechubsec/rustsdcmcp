@@ -1943,7 +1943,7 @@ dependencies = [
 
 [[package]]
 name = "rustsdcmcp"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1980,7 +1980,7 @@ dependencies = [
 
 [[package]]
 name = "rustsdcmcp-core"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "axum",

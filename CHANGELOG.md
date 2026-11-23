@@ -9,7 +9,7 @@ entries awaiting one coherent `mecmcp` release — **is cleared**. The `compat/`
 layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
 `369f9bb` on the move to 0.8.0.
 
-## Unreleased
+## `v0.7.1` — 2026-11-22
 
 ### Changed
 
@@ -20,6 +20,19 @@ layer was deleted in #36 on the move to mecmcp 0.7.2, and the ledger itself in
   Silicon pulls a native image instead of failing with `no matching manifest`
   (mechubsec/rustjunosmcp#648). Each platform builds on its own native runner. The post-release
   Trivy scan now covers both platforms.
+- The builder image moves to `rust:1.100-slim-trixie`, and `rust-toolchain.toml`
+  and the CI toolchain pins move to Rust 1.100.0 with it. MSRV is unchanged.
+- Dependency bumps: `rmcp` 3.9.0 to 3.10.0, `axum-server` 0.9.0 to 0.9.2,
+  `syn` 3.0.9 to 3.0.10; the `distroless/cc-debian13` digest pin (now only the
+  source of `libgcc_s.so.1`); the `mechubsec/mecmcp` reusable workflows and
+  conformance action from 0.32.0 to 0.33.1, and `release-image` pinned at
+  `v0.33.2` (#317).
+
+### Security
+
+- `RUSTSEC-2026-0543` (chrono unmaintained) is ignored in `deny.toml` and
+  `.cargo/audit.toml`: rmcp, oauth2 and mecmcp require chrono and no fix exists.
+  Revisit when rmcp drops it. (#322)
 
 ## `v0.7.0` — 2026-11-09
 
